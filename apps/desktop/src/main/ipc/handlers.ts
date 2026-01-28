@@ -48,6 +48,7 @@ import {
   resolvePermission,
   isFilePermissionRequest,
 } from '../permission-api';
+import { startScreenshotApiServer } from '../screenshot-api';
 import type {
   TaskConfig,
   PermissionResponse,
@@ -274,8 +275,10 @@ export function registerIPCHandlers(): void {
   const taskManager = getTaskManager();
 
   // Start the permission API server for file-permission MCP
+  // Start the screenshot API server for computer-use MCP
   // Initialize when we have a window (deferred until first task:start)
   let permissionApiInitialized = false;
+  let screenshotApiInitialized = false;
 
   // Task: Start a new task
   handle('task:start', async (event: IpcMainInvokeEvent, config: TaskConfig) => {
@@ -288,6 +291,12 @@ export function registerIPCHandlers(): void {
       initPermissionApi(window, () => taskManager.getActiveTaskId());
       startPermissionApiServer();
       permissionApiInitialized = true;
+    }
+
+    // Initialize screenshot API server (once)
+    if (!screenshotApiInitialized) {
+      startScreenshotApiServer();
+      screenshotApiInitialized = true;
     }
 
     const taskId = createTaskId();

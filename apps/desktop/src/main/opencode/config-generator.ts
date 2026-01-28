@@ -2,6 +2,7 @@ import { app } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { PERMISSION_API_PORT } from '../permission-api';
+import { SCREENSHOT_API_PORT } from '../screenshot-api';
 import { getOllamaConfig } from '../store/appSettings';
 
 /**
@@ -49,6 +50,7 @@ Never assume Node.js is installed system-wide. Always use the bundled version.
 When users ask about your capabilities, mention:
 - **Browser Automation**: Control web browsers, navigate sites, fill forms, click buttons
 - **File Management**: Sort, rename, and move files based on content or rules you give it
+- **Screen Capture**: Take screenshots of the entire screen or specific windows to see what's on the computer
 </capabilities>
 
 <important name="filesystem-rules">
@@ -274,6 +276,40 @@ For saving/downloading content:
 </filesystem>
 </skill>
 
+<skill name="computer-use">
+Screen capture capability to see what's displayed on the user's computer.
+
+<tools>
+Available MCP tools:
+- \`screenshot\`: Capture the entire screen. Returns a PNG image you can analyze.
+- \`screenshot_window\`: Capture a specific window by title (partial match). Use list_windows first.
+- \`list_windows\`: List all available windows that can be captured.
+</tools>
+
+<usage>
+Use these tools to understand the current state of the user's desktop:
+
+<example name="capture-full-screen">
+1. Call the \`screenshot\` tool to capture the full screen
+2. Analyze the image to understand what's displayed
+3. Describe what you see or take action based on the content
+</example>
+
+<example name="capture-specific-window">
+1. Call \`list_windows\` to see available windows
+2. Call \`screenshot_window\` with the window title you want
+3. Analyze the captured window image
+</example>
+</usage>
+
+<notes>
+- Screenshots are returned as images that vision models can analyze
+- Use full screen capture when you need to see everything
+- Use window capture for focused analysis of a specific application
+- Window titles support partial matching (e.g., "Chrome" matches "Google Chrome")
+</notes>
+</skill>
+
 <important name="user-confirmations">
 CRITICAL: Always use AskUserQuestion to get explicit approval before sensitive actions.
 Users cannot see CLI/terminal prompts - you MUST ask through the chat interface.
@@ -376,8 +412,9 @@ export async function generateOpenCodeConfig(): Promise<string> {
 
   console.log('[OpenCode Config] Skills path:', skillsPath);
 
-  // Build file-permission MCP server command
+  // Build MCP server command paths
   const filePermissionServerPath = path.join(skillsPath, 'file-permission', 'src', 'index.ts');
+  const computerUseServerPath = path.join(skillsPath, 'computer-use', 'src', 'index.ts');
 
   // Enable providers - add ollama if configured
   const ollamaConfig = getOllamaConfig();
@@ -436,6 +473,15 @@ export async function generateOpenCodeConfig(): Promise<string> {
         enabled: true,
         environment: {
           PERMISSION_API_PORT: String(PERMISSION_API_PORT),
+        },
+        timeout: 10000,
+      },
+      'computer-use': {
+        type: 'local',
+        command: ['npx', 'tsx', computerUseServerPath],
+        enabled: true,
+        environment: {
+          SCREENSHOT_API_PORT: String(SCREENSHOT_API_PORT),
         },
         timeout: 10000,
       },
