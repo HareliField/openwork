@@ -93,6 +93,31 @@ interface AccomplishAPI {
 
   // Logging
   logEvent(payload: { level?: string; message: string; context?: Record<string, unknown> }): Promise<unknown>;
+
+  // Screen Capture
+  getScreenSources(options?: { types?: ('screen' | 'window')[] }): Promise<Array<{
+    id: string;
+    name: string;
+    thumbnailDataUrl: string;
+    displayId: string;
+    appIconDataUrl?: string;
+  }>>;
+  getPrimaryDisplay(): Promise<{
+    id: string;
+    bounds: { x: number; y: number; width: number; height: number };
+    scaleFactor: number;
+    size: { width: number; height: number };
+    workArea: { x: number; y: number; width: number; height: number };
+  }>;
+  getAllDisplays(): Promise<Array<{
+    id: string;
+    bounds: { x: number; y: number; width: number; height: number };
+    scaleFactor: number;
+    size: { width: number; height: number };
+    workArea: { x: number; y: number; width: number; height: number };
+    isPrimary: boolean;
+  }>>;
+  getScreenSourceId(displayId?: string): Promise<string | null>;
 }
 
 interface AccomplishShell {
