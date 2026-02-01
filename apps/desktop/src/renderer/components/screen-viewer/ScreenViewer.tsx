@@ -62,11 +62,6 @@ export function ScreenViewer({
 
   // Start screen capture
   const startCapture = useCallback(async () => {
-    if (!selectedSourceId) {
-      await fetchSources();
-      return;
-    }
-
     try {
       setIsLoading(true);
       setError(null);
@@ -77,23 +72,27 @@ export function ScreenViewer({
         streamRef.current = null;
       }
 
-      // Request screen capture using the source ID
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
+      // Use getDisplayMedia which works with Electron's setDisplayMediaRequestHandler
+      // This automatically handles the screen selection
+      const stream = await navigator.mediaDevices.getDisplayMedia({
         video: {
-          // @ts-expect-error - Electron-specific constraint
-          mandatory: {
-            chromeMediaSource: 'desktop',
-            chromeMediaSourceId: selectedSourceId,
-            minWidth: 1280,
-            maxWidth: 1920,
-            minHeight: 720,
-            maxHeight: 1080,
-          },
+          width: { ideal: 1920, max: 1920 },
+          height: { ideal: 1080, max: 1080 },
+          frameRate: { ideal: 30, max: 60 },
         },
+        audio: false,
       });
 
       streamRef.current = stream;
+
+      // Handle stream ending (user stops sharing)
+      stream.getVideoTracks()[0]?.addEventListener('ended', () => {
+        setIsStreaming(false);
+        streamRef.current = null;
+        if (videoRef.current) {
+          videoRef.current.srcObject = null;
+        }
+      });
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
@@ -103,12 +102,17 @@ export function ScreenViewer({
       setIsStreaming(true);
     } catch (err) {
       console.error('Failed to start screen capture:', err);
-      setError('Failed to start screen capture. Please try again.');
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+      if (errorMessage.includes('Permission denied') || errorMessage.includes('NotAllowedError')) {
+        setError('Screen capture permission denied. Please grant access in System Preferences.');
+      } else {
+        setError('Failed to start screen capture. Please try again.');
+      }
       setIsStreaming(false);
     } finally {
       setIsLoading(false);
     }
-  }, [selectedSourceId, fetchSources]);
+  }, []);
 
   // Stop screen capture
   const stopCapture = useCallback(() => {
