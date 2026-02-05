@@ -312,9 +312,15 @@ export function registerIPCHandlers(): void {
     }
 
     // Setup event forwarding to renderer
+    // ERR-004: Wrap in try-catch to handle race condition where window is destroyed between check and send
     const forwardToRenderer = (channel: string, data: unknown) => {
-      if (!window.isDestroyed() && !sender.isDestroyed()) {
-        sender.send(channel, data);
+      try {
+        if (!window.isDestroyed() && !sender.isDestroyed()) {
+          sender.send(channel, data);
+        }
+      } catch (error) {
+        // Window was destroyed between the check and the send - this is expected during shutdown
+        console.debug('[IPC] Failed to forward to renderer (window destroyed):', channel);
       }
     };
 
@@ -542,9 +548,15 @@ export function registerIPCHandlers(): void {
     }
 
     // Setup event forwarding to renderer
+    // ERR-004: Wrap in try-catch to handle race condition where window is destroyed between check and send
     const forwardToRenderer = (channel: string, data: unknown) => {
-      if (!window.isDestroyed() && !sender.isDestroyed()) {
-        sender.send(channel, data);
+      try {
+        if (!window.isDestroyed() && !sender.isDestroyed()) {
+          sender.send(channel, data);
+        }
+      } catch (error) {
+        // Window was destroyed between the check and the send - this is expected during shutdown
+        console.debug('[IPC] Failed to forward to renderer (window destroyed):', channel);
       }
     };
 
@@ -661,16 +673,14 @@ export function registerIPCHandlers(): void {
       .filter((credential) => credential.account.startsWith('apiKey:'))
       .map((credential) => {
         const provider = credential.account.replace('apiKey:', '');
-        const keyPrefix =
-          credential.password && credential.password.length > 0
-            ? `${credential.password.substring(0, 8)}...`
-            : '';
+        // SEC-001: Don't expose actual key characters - use masked placeholder instead
+        const hasKey = credential.password && credential.password.length > 0;
 
         return {
           id: `local-${provider}`,
           provider,
           label: 'Local API Key',
-          keyPrefix,
+          keyPrefix: hasKey ? '••••••••...' : '',
           isActive: true,
           createdAt: new Date().toISOString(),
         };
@@ -694,7 +704,8 @@ export function registerIPCHandlers(): void {
         id: `local-${provider}`,
         provider,
         label: sanitizedLabel || 'Local API Key',
-        keyPrefix: sanitizedKey.substring(0, 8) + '...',
+        // SEC-001: Don't expose actual key characters - use masked placeholder
+        keyPrefix: '••••••••...',
         isActive: true,
         createdAt: new Date().toISOString(),
       };
@@ -719,7 +730,8 @@ export function registerIPCHandlers(): void {
   handle('api-key:set', async (_event: IpcMainInvokeEvent, key: string) => {
     const sanitizedKey = sanitizeString(key, 'apiKey', 256);
     await storeApiKey('anthropic', sanitizedKey);
-    console.log('[API Key] Key set', { keyPrefix: sanitizedKey.substring(0, 8) });
+    // SEC-001: Don't log key prefix
+    console.log('[API Key] Key set successfully');
   });
 
   // API Key: Get API key
@@ -757,7 +769,10 @@ export function registerIPCHandlers(): void {
         return { valid: true };
       }
 
-      const errorData = await response.json().catch(() => ({}));
+      const errorData = await response.json().catch((parseError) => {
+        console.warn('[API Key] Failed to parse error response:', parseError instanceof Error ? parseError.message : String(parseError));
+        return {};
+      });
       const errorMessage = (errorData as { error?: { message?: string } })?.error?.message || `API returned status ${response.status}`;
 
       console.warn('[API Key] Validation failed', { status: response.status, error: errorMessage });
@@ -851,7 +866,10 @@ export function registerIPCHandlers(): void {
         return { valid: true };
       }
 
-      const errorData = await response.json().catch(() => ({}));
+      const errorData = await response.json().catch((parseError) => {
+        console.warn(`[API Key] Failed to parse error response for ${provider}:`, parseError instanceof Error ? parseError.message : String(parseError));
+        return {};
+      });
       const errorMessage = (errorData as { error?: { message?: string } })?.error?.message || `API returned status ${response.status}`;
 
       console.warn(`[API Key] Validation failed for ${provider}`, { status: response.status, error: errorMessage });
@@ -1000,12 +1018,13 @@ export function registerIPCHandlers(): void {
   // API Keys: Get all API keys (with masked values)
   handle('api-keys:all', async (_event: IpcMainInvokeEvent) => {
     const keys = await getAllApiKeys();
-    // Return masked versions for UI
+    // SEC-001: Return masked versions for UI - don't expose actual key characters
     const masked: Record<string, { exists: boolean; prefix?: string }> = {};
     for (const [provider, key] of Object.entries(keys)) {
       masked[provider] = {
         exists: Boolean(key),
-        prefix: key ? key.substring(0, 8) + '...' : undefined,
+        // Use masked placeholder instead of actual key prefix
+        prefix: key ? '••••••••...' : undefined,
       };
     }
     return masked;

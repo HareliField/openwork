@@ -147,7 +147,16 @@ export function startPermissionApiServer(): http.Server {
     };
 
     // Send to renderer
-    mainWindow.webContents.send('permission:request', permissionRequest);
+    // ERR-002: Wrap in try-catch to handle race condition where window is destroyed between check and send
+    try {
+      mainWindow.webContents.send('permission:request', permissionRequest);
+    } catch (error) {
+      // Window was destroyed - reject the permission request
+      console.warn('[Permission API] Failed to send permission request (window destroyed)');
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Window destroyed', allowed: false }));
+      return;
+    }
 
     // Wait for user response (with 5 minute timeout)
     const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
