@@ -444,6 +444,9 @@ export function registerIPCHandlers(): void {
   handle('task:cancel', async (_event: IpcMainInvokeEvent, taskId?: string) => {
     if (!taskId) return;
 
+    // BUG-001: Always cleanup batcher when task is cancelled
+    flushAndCleanupBatcher(taskId);
+
     // Check if it's a queued task first
     if (taskManager.isTaskQueued(taskId)) {
       taskManager.cancelQueuedTask(taskId);

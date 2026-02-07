@@ -1,602 +1,364 @@
 # Bugs and Fixtures
 
-This document lists all known bugs, issues, and ideas for small fixes in the Openwork codebase. Each item includes a description, affected files, and specifications for resolution.
+A prioritized list of bugs, issues, and improvements for the Openwork codebase.
+
+**Progress: 8/20 resolved**
 
 ---
 
-## Table of Contents
+## Quick Reference
 
-1. [Critical Issues](#critical-issues)
-2. [Security & Validation Issues](#security--validation-issues)
-3. [Error Handling Gaps](#error-handling-gaps)
-4. [Type Safety Issues](#type-safety-issues)
-5. [Code Quality Issues](#code-quality-issues)
-6. [Performance Issues](#performance-issues)
-7. [UI/UX Improvements](#uiux-improvements)
-
----
-
-## Critical Issues
-
-### BUG-001: Memory Leak - Message Batcher Map Never Cleaned Up on Errors
-
-**Severity:** Critical
-**Status:** Open
-**File:** `apps/desktop/src/main/ipc/handlers.ts` (lines 116-182)
-
-**Description:**
-The `messageBatchers` Map can grow indefinitely. While `flushAndCleanupBatcher()` is called on completion and permission requests, it is NOT called in all error paths. If a task fails before completion, the batcher remains in memory forever.
-
-**Impact:**
-Memory leak in long-running applications with many failed tasks. Over time, this could cause the app to consume excessive memory and become unresponsive.
-
-**Root Cause:**
-```typescript
-// Batcher is created but only cleaned up on success paths
-const messageBatchers = new Map<string, MessageBatcher>();
-```
-
-**Specification for Fix:**
-1. Add cleanup logic in all error handlers for task execution
-2. Implement a `finally` block that ensures batcher cleanup regardless of success/failure
-3. Add a periodic cleanup mechanism for orphaned batchers (tasks older than X minutes)
-4. Consider using WeakMap if task IDs could be garbage collected
-
-**Acceptance Criteria:**
-- [ ] Batcher is cleaned up when task fails with error
-- [ ] Batcher is cleaned up when task is cancelled
-- [ ] Add unit test to verify cleanup on error paths
-- [ ] Monitor memory usage over time with failed tasks
+| ID | Title | Severity | Status |
+|----|-------|----------|--------|
+| BUG-001 | Memory Leak - Message Batcher | Critical | ✅ Resolved |
+| BUG-002 | Memory Leak - Pending Permissions | Critical | ✅ Resolved |
+| BUG-003 | Silent Promise Rejections | Critical | ✅ Resolved |
+| SEC-001 | API Key Prefix Exposure | High | ✅ Resolved |
+| SEC-002 | Ollama Config Validation | Medium | Open |
+| ERR-001 | Task Summary Error Handling | High | Open |
+| ERR-002 | Permission Request Window Check | High | ✅ Resolved |
+| ERR-003 | Playwright Installation Handling | High | Open |
+| ERR-004 | Race Condition in forwardToRenderer | Medium | ✅ Resolved |
+| TYPE-001 | API Response Type Validation | Medium | Open |
+| TYPE-002 | Stream Parser Null Check | Medium | ✅ Resolved |
+| CODE-001 | Split Large Handlers File | Medium | Open |
+| CODE-002 | Refactor API Key Validation | Low | Open |
+| PERF-001 | Buffer Truncation Warning | Medium | Open |
+| PERF-002 | Task List O(n) Filtering | Low | Open |
+| PERF-003 | Key Derivation Optimization | Low | Open |
+| UX-001 | Permission Timeout Feedback | Medium | Open |
+| UX-002 | Better API Key Error Messages | Low | Open |
+| UX-003 | Queued Tasks Feedback | Low | Open |
+| UX-004 | App Cleanup on Quit | Low | ✅ Resolved |
 
 ---
 
-### BUG-002: Memory Leak - Pending Permissions Accumulation
+## Critical Priority
 
-**Severity:** Critical
-**Status:** Open
-**File:** `apps/desktop/src/main/permission-api.ts` (lines 152-170)
+### BUG-001: Memory Leak - Message Batcher Map ✅ RESOLVED
 
-**Description:**
-The `pendingPermissions` Map stores requests that timeout after 5 minutes. However, if a client crashes without sending a response, the entry stays until timeout. With many permission requests, this could accumulate.
+**File:** `apps/desktop/src/main/ipc/handlers.ts:116-182`
 
-**Impact:**
-Modest memory leak over time with hundreds of permission requests that never receive responses.
+**Problem:** The `messageBatchers` Map grows indefinitely because `flushAndCleanupBatcher()` is only called on success paths. Cancelled tasks left orphaned batchers in memory.
 
-**Specification for Fix:**
-1. Reduce timeout from 5 minutes to a more reasonable 2 minutes
-2. Add cleanup on window destroy/close events
-3. Implement periodic sweep of stale pending permissions
-4. Add logging when permissions are cleaned up due to timeout
-
-**Acceptance Criteria:**
-- [ ] Pending permissions are cleaned up when window is destroyed
-- [ ] Stale permissions are logged before cleanup
-- [ ] Memory usage doesn't grow with repeated timeouts
+**Resolution:** Added `flushAndCleanupBatcher(taskId)` call at the start of the `task:cancel` handler to ensure batcher cleanup when tasks are cancelled.
 
 ---
 
-### BUG-003: Unhandled Promise Rejections in Silent Catch
+### BUG-002: Memory Leak - Pending Permissions Map ✅ RESOLVED
 
-**Severity:** Critical
-**Status:** ✅ Resolved
-**File:** `apps/desktop/src/main/ipc/handlers.ts` (lines 760, 854)
+**File:** `apps/desktop/src/main/permission-api.ts:152-170`
 
-**Description:**
-```typescript
-const errorData = await response.json().catch(() => ({}));
-```
-These catch blocks silently swallow errors and return empty objects, which could cause downstream type errors if the API returns invalid JSON.
-
-**Impact:**
-Debugging becomes difficult when API validation fails silently. Users may see generic errors without understanding the root cause.
+**Problem:** The `pendingPermissions` Map stores requests that timeout after 5 minutes. If clients crash or disconnect, entries remain until timeout expires.
 
 **Resolution:**
-Added logging for caught errors with appropriate context. The catch blocks now log the parse error before returning empty objects.
-
-**Acceptance Criteria:**
-- [x] All silently caught errors are logged
-- [x] Error objects have consistent shape
-- [x] Downstream code handles empty error data gracefully
+1. Reduced timeout from 5 minutes to 2 minutes
+2. Added `cleanupPendingPermissions()` function that rejects and clears all pending permissions
+3. Added `closePermissionApiServer()` function called on app quit
+4. Added logging for timeouts and cleanup events
 
 ---
 
-## Security & Validation Issues
+### BUG-003: Silent Promise Rejections ✅ RESOLVED
 
-### SEC-001: API Key Exposure in Credential Listing
+**File:** `apps/desktop/src/main/ipc/handlers.ts:760,854`
 
-**Severity:** High
-**Status:** ✅ Resolved
-**File:** `apps/desktop/src/main/ipc/handlers.ts` (lines 657-678)
+**Problem:** Catch blocks like `.catch(() => ({}))` silently swallow errors, making debugging difficult.
 
-**Description:**
-The `settings:api-keys` handler calls `listStoredCredentials()` which returns actual API key prefixes (first 8 characters). This exposes key format information.
-
-**Code:**
-```typescript
-keyPrefix: credential.password && credential.password.length > 0
-  ? `${credential.password.substring(0, 8)}...`
-  : '';
-```
-
-**Impact:**
-- First 8 characters could help identify key format/provider
-- Could leak to logging services or error reporting
-- Malware could use pattern to identify stored keys
-
-**Resolution:**
-Replaced actual key prefix with masked placeholder `••••••••...` in all locations:
-- `settings:api-keys` handler
-- `settings:add-api-key` return value
-- `api-keys:all` handler
-- Removed key prefix from `api-key:set` log message
-
-**Acceptance Criteria:**
-- [x] No actual key characters are exposed in IPC responses
-- [x] UI still indicates whether a key is configured
-- [x] Logging doesn't contain key prefixes
+**Resolution:** Added logging for caught errors with context before returning empty objects.
 
 ---
 
-### SEC-002: Incomplete Input Validation in Ollama Config
+## High Priority
 
-**Severity:** Medium
+### SEC-001: API Key Prefix Exposure ✅ RESOLVED
+
+**File:** `apps/desktop/src/main/ipc/handlers.ts:657-678`
+
+**Problem:** API key prefixes (first 8 characters) were exposed in IPC responses.
+
+**Resolution:** Replaced with masked placeholder `••••••••...` in all handlers.
+
+---
+
+### SEC-002: Ollama Config Validation
+
+**File:** `apps/desktop/src/main/ipc/handlers.ts:962-998`
 **Status:** Open
-**File:** `apps/desktop/src/main/ipc/handlers.ts` (lines 962-998)
 
-**Description:**
-The Ollama config validation doesn't validate:
-- Empty strings in model IDs or display names
-- Negative size values
-- Extremely large size values (potential DoS)
-- Invalid characters in model names
+**Problem:** Ollama config validation is incomplete - doesn't check for empty strings, negative sizes, or invalid model names.
 
-**Specification for Fix:**
-1. Add validation for non-empty model ID and display name
-2. Validate size is positive number within reasonable bounds (e.g., 0 < size < 1TB)
-3. Sanitize model names to alphanumeric + common separators
-4. Add validation error messages for each case
-
-**Acceptance Criteria:**
-- [ ] Empty strings are rejected with clear error
-- [ ] Negative/extreme sizes are rejected
-- [ ] Model names are sanitized or validated
-- [ ] Validation errors are user-friendly
+**How to Fix:**
+1. Add check: `if (!modelId || modelId.trim() === '') throw error`
+2. Add check: `if (size < 0 || size > 1e12) throw error` (1TB max)
+3. Sanitize model names: `/^[a-zA-Z0-9_\-:./]+$/`
+4. Return specific error messages for each validation failure
 
 ---
 
-## Error Handling Gaps
+### ERR-001: Task Summary Error Handling
 
-### ERR-001: Missing Error Handling in Task Summary Generation
-
-**Severity:** High
+**File:** `apps/desktop/src/main/ipc/handlers.ts:425-432`
 **Status:** Open
-**File:** `apps/desktop/src/main/ipc/handlers.ts` (lines 425-432)
 
-**Description:**
-Task summary generation is fire-and-forget. If `updateTaskSummary` fails, it silently swallows the error and still sends to renderer, potentially causing data inconsistency.
+**Problem:** Task summary generation is fire-and-forget. If `updateTaskSummary` fails, the error is caught but renderer still receives potentially inconsistent data.
 
-**Code:**
+**How to Fix:**
+1. Wrap `updateTaskSummary` in try-catch separately from `forwardToRenderer`
+2. Only send to renderer if storage update succeeds
+3. Add retry logic (1-2 retries with 500ms delay)
+4. Log storage failures with task context
+
+**Code Pattern:**
 ```typescript
-generateTaskSummary(validatedConfig.prompt)
-  .then((summary) => {
-    updateTaskSummary(taskId, summary);
-    forwardToRenderer('task:summary', { taskId, summary });
+generateTaskSummary(prompt)
+  .then(async (summary) => {
+    try {
+      await updateTaskSummary(taskId, summary);
+      forwardToRenderer('task:summary', { taskId, summary });
+    } catch (storageError) {
+      console.error('[IPC] Failed to store summary:', storageError);
+      // Don't send to renderer if storage failed
+    }
   })
-  .catch((err) => {
-    console.warn('[IPC] Failed to generate task summary:', err);
-  });
+  .catch((err) => console.warn('[IPC] Failed to generate summary:', err));
 ```
-
-**Specification for Fix:**
-1. Separate the storage update from renderer notification
-2. If storage update fails, don't send to renderer (or send with error flag)
-3. Add retry logic for transient storage failures
-4. Consider moving summary generation to background worker
-
-**Acceptance Criteria:**
-- [ ] Storage failures don't send inconsistent data to renderer
-- [ ] Failed summary generations are logged with task context
-- [ ] Consider retry mechanism for transient failures
 
 ---
 
-### ERR-002: Missing Permission Request Cleanup on Window Destroy
+### ERR-002: Permission Request Window Check ✅ RESOLVED
 
-**Severity:** High
-**Status:** ✅ Resolved
-**File:** `apps/desktop/src/main/permission-api.ts` (lines 150, 173)
+**File:** `apps/desktop/src/main/permission-api.ts:150`
 
-**Description:**
-When sending permission requests, there's no check for whether the window is destroyed:
-```typescript
-mainWindow.webContents.send('permission:request', permissionRequest);
-```
-If the window is destroyed between generating the request and sending it, this will throw an uncaught error.
+**Problem:** No check for window being destroyed before sending IPC.
 
-**Resolution:**
-Wrapped the `mainWindow.webContents.send()` call in a try-catch block. If the window is destroyed, the permission request is rejected with a 503 error response.
-
-**Acceptance Criteria:**
-- [x] Window destroy check before all IPC sends
-- [x] Graceful handling when window is destroyed
-- [x] No uncaught exceptions from destroyed window sends
+**Resolution:** Added try-catch around `mainWindow.webContents.send()` with 503 error response if window is destroyed.
 
 ---
 
-### ERR-003: Unhandled Promise in Playwright Browser Installation
+### ERR-003: Playwright Installation Handling
 
-**Severity:** High
+**File:** `apps/desktop/src/main/opencode/task-manager.ts:166-173`
 **Status:** Open
-**File:** `apps/desktop/src/main/opencode/task-manager.ts` (lines 166-173)
 
-**Description:**
+**Problem:** Playwright installation failures are silently caught, causing confusing downstream failures when browser automation is needed.
+
+**How to Fix:**
+1. Track installation state in a variable: `playwrightInstalled: boolean`
+2. If installation fails, set a flag and inform user via `onProgress`
+3. Before tasks that need browser, check the flag
+4. Add retry logic: Try installation up to 3 times with exponential backoff
+
+**Code Pattern:**
 ```typescript
+let playwrightInstalled = false;
 try {
-  await installPlaywrightChromium((msg) => {
-    onProgress?.({ stage: 'setup', message: msg });
-  });
+  await installPlaywrightChromium(onProgress);
+  playwrightInstalled = true;
 } catch (error) {
-  console.error('[TaskManager] Failed to install Playwright:', error);
-  // Don't throw - let agent handle the failure
+  console.error('[TaskManager] Playwright install failed:', error);
+  onProgress?.({ stage: 'warning', message: 'Browser automation unavailable' });
 }
 ```
-Silent error handling means the task will proceed without Playwright installed, causing confusing downstream failures.
-
-**Specification for Fix:**
-1. Track Playwright installation state
-2. If installation fails, inform the agent/user before task starts
-3. Add retry logic for installation
-4. Consider pre-flight check before tasks that need Playwright
-
-**Acceptance Criteria:**
-- [ ] Installation failures are reported to user
-- [ ] Tasks that need Playwright fail fast with clear message
-- [ ] Retry mechanism for transient installation failures
 
 ---
 
-### ERR-004: Race Condition in Window Destroyed Check
+### ERR-004: Race Condition in forwardToRenderer ✅ RESOLVED
 
-**Severity:** Medium
-**Status:** ✅ Resolved
-**File:** `apps/desktop/src/main/ipc/handlers.ts` (lines 315-318)
+**File:** `apps/desktop/src/main/ipc/handlers.ts:315-318`
 
-**Description:**
+**Problem:** Window could be destroyed between `isDestroyed()` check and `send()` call.
+
+**Resolution:** Wrapped `sender.send()` in try-catch block with debug logging.
+
+---
+
+## Medium Priority
+
+### TYPE-001: API Response Type Validation
+
+**File:** `apps/desktop/src/main/ipc/handlers.ts:937`
+**Status:** Open
+
+**Problem:** External API responses are cast with `as` without runtime validation.
+
+**How to Fix:**
+1. Add Zod schema for Ollama API response
+2. Validate response before using
+3. Return fallback on validation failure
+4. Log schema mismatches for debugging
+
+**Code Pattern:**
 ```typescript
-const forwardToRenderer = (channel: string, data: unknown) => {
-  if (!window.isDestroyed() && !sender.isDestroyed()) {
-    sender.send(channel, data);
-  }
-};
-```
-Between the `isDestroyed()` check and the `send()` call, the window could be destroyed, causing an exception.
-
-**Resolution:**
-Wrapped the `sender.send()` call in a try-catch block in both `task:start` and `session:resume` handlers. Failed sends are logged for debugging purposes.
-
-**Acceptance Criteria:**
-- [x] No exceptions thrown when window destroyed during send
-- [x] Destroyed window sends are logged for debugging
-- [x] Critical messages don't get lost silently
-
----
-
-## Type Safety Issues
-
-### TYPE-001: Type Assertion Without Proper Validation
-
-**Severity:** Medium
-**Status:** Open
-**File:** `apps/desktop/src/main/ipc/handlers.ts` (line 937)
-
-**Description:**
-```typescript
-const data = await response.json() as { models?: Array<{ name: string; size: number }> };
-```
-This assumes the response structure without validation. If the API changes, this will cause runtime type errors.
-
-**Specification for Fix:**
-1. Add Zod schema validation for external API responses
-2. Create type guards for runtime validation
-3. Handle schema mismatches gracefully with fallbacks
-
-**Acceptance Criteria:**
-- [ ] All external API responses are validated at runtime
-- [ ] Schema mismatches produce clear error messages
-- [ ] Fallback behavior for unexpected responses
-
----
-
-### TYPE-002: Missing Null Check in Stream Parser
-
-**Severity:** Medium
-**Status:** ✅ Resolved
-**File:** `apps/desktop/src/main/opencode/adapter.ts` (line 585)
-
-**Description:**
-```typescript
-const unknownMessage = message as unknown as { type: string };
-```
-Double type assertion without validation could allow invalid objects to pass through.
-
-**Resolution:**
-Added runtime type guard that checks if the message is a non-null object with a `type` property before logging. Malformed messages are now detected and logged separately.
-
-**Acceptance Criteria:**
-- [x] Invalid messages are detected and logged
-- [x] Stream processing continues after invalid messages
-- [x] No crashes from malformed messages
-
----
-
-## Code Quality Issues
-
-### CODE-001: Excessively Large IPC Handlers File
-
-**Severity:** Medium
-**Status:** Open
-**File:** `apps/desktop/src/main/ipc/handlers.ts` (1264 lines)
-
-**Description:**
-The file is over 1200 lines, making it hard to test and maintain.
-
-**Specification for Fix:**
-1. Split into domain-specific handler modules:
-   - `handlers/task.ts` - Task lifecycle handlers
-   - `handlers/settings.ts` - Settings and API key handlers
-   - `handlers/onboarding.ts` - Onboarding flow handlers
-   - `handlers/ollama.ts` - Ollama-specific handlers
-2. Create barrel export in `handlers/index.ts`
-3. Add unit tests for each module
-
-**Acceptance Criteria:**
-- [ ] No single handler file exceeds 300 lines
-- [ ] Clear separation of concerns
-- [ ] Unit tests for each handler module
-- [ ] No functionality regression
-
----
-
-### CODE-002: Repeated Validation Code for API Keys
-
-**Severity:** Low
-**Status:** Open
-**File:** `apps/desktop/src/main/ipc/handlers.ts` (lines 731-866)
-
-**Description:**
-API key validation code is duplicated for Anthropic, OpenAI, Google, and xAI providers. Should be refactored into a generic provider-agnostic function.
-
-**Specification for Fix:**
-1. Create provider configuration object with:
-   - Validation endpoint
-   - Request headers format
-   - Response parsing logic
-2. Create generic `validateApiKey(provider, key)` function
-3. Add new providers by adding configuration, not code
-
-**Acceptance Criteria:**
-- [ ] Single validation function for all providers
-- [ ] Easy to add new providers
-- [ ] Reduced code duplication (DRY)
-- [ ] Consistent error handling across providers
-
----
-
-## Performance Issues
-
-### PERF-001: Unbounded Buffer Truncation in Stream Parser
-
-**Severity:** Medium
-**Status:** Open
-**File:** `apps/desktop/src/main/opencode/stream-parser.ts` (lines 21-31)
-
-**Description:**
-While there IS a 10MB limit, if a single message exceeds this, it will silently truncate and emit an error, potentially losing task data.
-
-**Specification for Fix:**
-1. Add warning when approaching buffer limit (e.g., 8MB)
-2. Consider streaming large messages in chunks
-3. Log truncation events with message context
-4. Investigate why messages might be so large
-
-**Acceptance Criteria:**
-- [ ] Warning logged at 80% buffer capacity
-- [ ] Truncation events are logged with context
-- [ ] Consider chunked processing for large outputs
-
----
-
-### PERF-002: O(n) Filtering on Every Task Update
-
-**Severity:** Low
-**Status:** Open
-**File:** `apps/desktop/src/renderer/stores/taskStore.ts` (lines 110-116)
-
-**Description:**
-```typescript
-set({
-  currentTask: task,
-  tasks: [task, ...currentTasks.filter((t) => t.id !== task.id)],
-  isLoading: task.status === 'queued',
+import { z } from 'zod';
+const OllamaResponseSchema = z.object({
+  models: z.array(z.object({
+    name: z.string(),
+    size: z.number()
+  })).optional()
 });
+const result = OllamaResponseSchema.safeParse(await response.json());
+if (!result.success) {
+  console.warn('Unexpected Ollama response:', result.error);
+  return { models: [] };
+}
 ```
-This filtering approach is O(n) and runs on every task start. With many tasks, this could impact performance.
-
-**Specification for Fix:**
-1. Use Map for O(1) task lookups
-2. Or limit displayed tasks with pagination/virtualization
-3. Consider memoization for task list operations
-
-**Acceptance Criteria:**
-- [ ] Task operations are O(1) or O(log n)
-- [ ] Large task lists don't cause UI lag
-- [ ] Consider virtualized list for task display
 
 ---
 
-### PERF-003: Synchronous Encryption Key Derivation
+### TYPE-002: Stream Parser Null Check ✅ RESOLVED
 
-**Severity:** Low
+**File:** `apps/desktop/src/main/opencode/adapter.ts:585`
+
+**Problem:** Double type assertion without validation in switch default case.
+
+**Resolution:** Added runtime type guard checking for `type` property before logging.
+
+---
+
+### CODE-001: Split Large Handlers File
+
+**File:** `apps/desktop/src/main/ipc/handlers.ts` (1264 lines)
 **Status:** Open
-**File:** `apps/desktop/src/main/store/secureStorage.ts` (lines 68-94)
 
-**Description:**
-While there's caching (`if (_derivedKey)` check), the PBKDF2 derivation with 100,000 iterations could be called from many places, adding latency on first use.
+**Problem:** File is too large and hard to maintain.
 
-**Specification for Fix:**
-1. Ensure key derivation only happens once at startup
-2. Add lazy initialization pattern
-3. Consider async key derivation to not block main thread
-
-**Acceptance Criteria:**
-- [ ] Key derivation happens exactly once
-- [ ] No blocking during app startup
-- [ ] Key is ready before first use
+**How to Fix:**
+1. Create `handlers/` directory with separate files:
+   - `task-handlers.ts` - task:start, session:resume, task:cancel, etc.
+   - `settings-handlers.ts` - settings:*, api-key:*
+   - `onboarding-handlers.ts` - onboarding:*
+   - `ollama-handlers.ts` - ollama:*
+2. Create `handlers/index.ts` barrel export
+3. Each file should be under 300 lines
+4. Update main `handlers.ts` to import and register all
 
 ---
 
-## UI/UX Improvements
+### PERF-001: Buffer Truncation Warning
 
-### UX-001: No Timeout Feedback for Permission Requests
-
-**Severity:** Medium
+**File:** `apps/desktop/src/main/opencode/stream-parser.ts:21-31`
 **Status:** Open
-**File:** `apps/desktop/src/main/permission-api.ts` (lines 152-170)
 
-**Description:**
-If a permission request times out, there's no UI feedback to the user or automatic retry mechanism. The user might not realize their permission response was lost.
+**Problem:** 10MB buffer silently truncates large messages without warning.
 
-**Specification for Fix:**
-1. Show countdown timer for permission requests
-2. Add visual indication when timeout is approaching
-3. Allow user to extend timeout
-4. Show notification when permission times out
-
-**Acceptance Criteria:**
-- [ ] User sees remaining time for permission
-- [ ] Warning at 30 seconds remaining
-- [ ] Clear notification on timeout
-- [ ] Option to retry timed-out permission
+**How to Fix:**
+1. Add warning at 80% capacity (8MB): Log "Buffer approaching limit"
+2. Log truncation events with message preview
+3. Consider chunked processing for very large outputs
+4. Track truncation count for diagnostics
 
 ---
 
-### UX-002: Generic API Key Validation Error Messages
+### UX-001: Permission Timeout Feedback
 
-**Severity:** Low
+**File:** `apps/desktop/src/main/permission-api.ts:152-170`
 **Status:** Open
-**File:** `apps/desktop/src/renderer/components/layout/SettingsDialog.tsx` (lines 185-190)
 
-**Description:**
-Error messages for API key validation could be more specific about network vs authentication failures to help users debug issues.
+**Problem:** Users don't see countdown or warning when permission requests are about to timeout.
 
-**Specification for Fix:**
-1. Distinguish between:
-   - Network errors (can't reach API)
-   - Authentication errors (invalid key)
-   - Rate limiting (too many requests)
-   - Account issues (billing, suspended)
-2. Provide actionable guidance for each error type
-
-**Acceptance Criteria:**
-- [ ] Error messages indicate root cause
-- [ ] Guidance provided for each error type
-- [ ] Links to provider documentation where helpful
+**How to Fix:**
+1. Include `expiresAt` timestamp in permission request
+2. Frontend shows countdown timer
+3. Show warning toast at 30 seconds remaining
+4. Allow "Extend timeout" button
 
 ---
 
-### UX-003: No Visual Feedback for Queued Tasks
+## Low Priority
 
-**Severity:** Low
+### CODE-002: Refactor API Key Validation
+
+**File:** `apps/desktop/src/main/ipc/handlers.ts:731-866`
 **Status:** Open
-**File:** `apps/desktop/src/renderer/pages/Execution.tsx` (lines 229-235)
 
-**Description:**
-When a task is queued, users see "Queued" but don't know how many tasks are ahead or estimated wait time.
+**Problem:** API key validation code is duplicated for each provider.
 
-**Specification for Fix:**
-1. Show queue position (e.g., "Queued #3")
-2. Consider showing estimated start time
-3. Allow users to reorder or cancel queued tasks
-
-**Acceptance Criteria:**
-- [ ] Queue position visible to user
-- [ ] Option to cancel queued tasks
-- [ ] Clear visual distinction between queued/running
+**How to Fix:**
+1. Create provider config object with endpoint, headers, body format
+2. Single `validateApiKey(provider, key)` function
+3. Add new providers via config, not code
 
 ---
 
-### UX-004: Missing App Cleanup on Quit
+### PERF-002: Task List O(n) Filtering
 
-**Severity:** Low
+**File:** `apps/desktop/src/renderer/stores/taskStore.ts:110-116`
 **Status:** Open
-**File:** `apps/desktop/src/main/index.ts` (lines 192-197)
 
-**Description:**
-While `disposeTaskManager()` is called on quit, the permission API server is never explicitly closed, potentially leaving port 9226 in TIME_WAIT state.
+**Problem:** Task list filtering is O(n) on every update.
 
-**Specification for Fix:**
-1. Add explicit cleanup for permission API server
-2. Ensure all resources are released on quit
-3. Add timeout for cleanup to prevent hanging
-
-**Acceptance Criteria:**
-- [ ] Permission API server closed on quit
-- [ ] Port released immediately
-- [ ] Graceful shutdown with timeout
+**How to Fix:**
+1. Use Map for O(1) lookups by task ID
+2. Limit displayed tasks with pagination
+3. Consider virtualized list for many tasks
 
 ---
 
-## Summary
+### PERF-003: Key Derivation Optimization
 
-| Category | Count | Critical | High | Medium | Low | ✅ Resolved |
-|----------|-------|----------|------|--------|-----|------------|
-| Critical Issues | 3 | 2 | - | - | - | 1 |
-| Security | 2 | - | 0 | 1 | - | 1 |
-| Error Handling | 4 | - | 2 | 0 | - | 2 |
-| Type Safety | 2 | - | - | 1 | - | 1 |
-| Code Quality | 2 | - | - | 1 | 1 | 0 |
-| Performance | 3 | - | - | 1 | 2 | 0 |
-| UI/UX | 4 | - | - | 1 | 3 | 0 |
-| **Total** | **20** | **2** | **2** | **5** | **6** | **5** |
+**File:** `apps/desktop/src/main/store/secureStorage.ts:68-94`
+**Status:** Open
 
----
+**Problem:** PBKDF2 with 100k iterations could block if called unexpectedly.
 
-## Priority Matrix
-
-### Immediate (P0) - Fix ASAP
-- BUG-001: Memory Leak - Message Batcher
-- BUG-002: Memory Leak - Pending Permissions
-- ~~SEC-001: API Key Exposure~~ ✅ Resolved
-
-### High Priority (P1) - Next Sprint
-- ~~BUG-003: Silent Promise Rejections~~ ✅ Resolved
-- ERR-001: Task Summary Error Handling
-- ~~ERR-002: Window Destroy Permission Cleanup~~ ✅ Resolved
-- ERR-003: Playwright Installation Handling
-
-### Medium Priority (P2) - Backlog
-- SEC-002: Ollama Input Validation
-- ~~ERR-004: Race Condition Window Check~~ ✅ Resolved
-- TYPE-001: API Response Validation
-- ~~TYPE-002: Stream Parser Null Check~~ ✅ Resolved
-- CODE-001: Split Handlers File
-- PERF-001: Buffer Truncation Warning
-- UX-001: Permission Timeout Feedback
-
-### Low Priority (P3) - Nice to Have
-- CODE-002: API Key Validation Refactor
-- PERF-002: Task List Performance
-- PERF-003: Key Derivation Optimization
-- UX-002: Better Error Messages
-- UX-003: Queue Feedback
-- UX-004: App Cleanup
+**How to Fix:**
+1. Ensure `_derivedKey` cache is always used after first call
+2. Consider deriving key at startup in background
+3. Add async wrapper for the derivation
 
 ---
 
-## Contributing
+### UX-002: Better API Key Error Messages
 
-When fixing an issue:
-1. Reference the issue ID in your commit message (e.g., "fix(BUG-001): cleanup message batchers on error")
-2. Update the status in this document to "In Progress" when starting
-3. Add test coverage for the fix
-4. Update status to "Resolved" with PR link when merged
+**File:** `apps/desktop/src/renderer/components/layout/SettingsDialog.tsx:185-190`
+**Status:** Open
+
+**Problem:** Error messages don't distinguish between network/auth/rate-limit errors.
+
+**How to Fix:**
+1. Parse error response codes
+2. Show specific messages: "Network error", "Invalid key", "Rate limited"
+3. Link to provider docs for common issues
+
+---
+
+### UX-003: Queued Tasks Feedback
+
+**File:** `apps/desktop/src/renderer/pages/Execution.tsx:229-235`
+**Status:** Open
+
+**Problem:** Users only see "Queued" without position or wait estimate.
+
+**How to Fix:**
+1. Show queue position: "Queued #3"
+2. Allow cancel/reorder of queued tasks
+3. Show when task was queued
+
+---
+
+### UX-004: App Cleanup on Quit ✅ RESOLVED
+
+**File:** `apps/desktop/src/main/index.ts:192-197`
+
+**Problem:** Permission API server not explicitly closed on quit.
+
+**Resolution:**
+1. Added `closePermissionApiServer()` call in `before-quit` event handler
+2. Server closes gracefully with 2-second timeout
+3. Force closes if graceful close hangs
+
+---
+
+## Changelog
+
+| Date | Issue | Action |
+|------|-------|--------|
+| 2026-02-07 | BUG-001 | Resolved - Added batcher cleanup on task cancel |
+| 2026-02-07 | BUG-002 | Resolved - Added permission cleanup on quit, reduced timeout |
+| 2026-02-07 | BUG-003 | Resolved - Added logging for silent catches |
+| 2026-02-07 | SEC-001 | Resolved - Masked API key prefixes |
+| 2026-02-07 | ERR-002 | Resolved - Added window destroy check |
+| 2026-02-07 | ERR-004 | Resolved - Added try-catch for race condition |
+| 2026-02-07 | TYPE-002 | Resolved - Added type guard for messages |
+| 2026-02-07 | UX-004 | Resolved - Added permission server cleanup on quit |

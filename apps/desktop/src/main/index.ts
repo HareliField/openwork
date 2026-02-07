@@ -7,6 +7,7 @@ import { registerIPCHandlers } from './ipc/handlers';
 import { flushPendingTasks } from './store/taskHistory';
 import { disposeTaskManager } from './opencode/task-manager';
 import { checkAndCleanupFreshInstall } from './store/freshInstallCleanup';
+import { closePermissionApiServer } from './permission-api';
 
 // Local UI - no longer uses remote URL
 
@@ -189,11 +190,13 @@ app.on('window-all-closed', () => {
 });
 
 // Flush pending task history writes and dispose TaskManager before quitting
-app.on('before-quit', () => {
+app.on('before-quit', async () => {
   console.log('[Main] App before-quit event fired');
   flushPendingTasks();
   // Dispose all active tasks and cleanup PTY processes
   disposeTaskManager();
+  // BUG-002/UX-004: Close permission API server and cleanup pending permissions
+  await closePermissionApiServer();
 });
 
 // Handle custom protocol (accomplish://)
