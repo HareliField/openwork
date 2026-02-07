@@ -2,7 +2,7 @@
 
 A prioritized list of bugs, issues, and improvements for the Openwork codebase.
 
-**Progress: 8/20 resolved**
+**Progress: 11/20 resolved**
 
 ---
 
@@ -14,10 +14,10 @@ A prioritized list of bugs, issues, and improvements for the Openwork codebase.
 | BUG-002 | Memory Leak - Pending Permissions | Critical | ✅ Resolved |
 | BUG-003 | Silent Promise Rejections | Critical | ✅ Resolved |
 | SEC-001 | API Key Prefix Exposure | High | ✅ Resolved |
-| SEC-002 | Ollama Config Validation | Medium | Open |
-| ERR-001 | Task Summary Error Handling | High | Open |
+| SEC-002 | Ollama Config Validation | Medium | ✅ Resolved |
+| ERR-001 | Task Summary Error Handling | High | ✅ Resolved |
 | ERR-002 | Permission Request Window Check | High | ✅ Resolved |
-| ERR-003 | Playwright Installation Handling | High | Open |
+| ERR-003 | Playwright Installation Handling | High | ✅ Resolved |
 | ERR-004 | Race Condition in forwardToRenderer | Medium | ✅ Resolved |
 | TYPE-001 | API Response Type Validation | Medium | Open |
 | TYPE-002 | Stream Parser Null Check | Medium | ✅ Resolved |
@@ -81,48 +81,28 @@ A prioritized list of bugs, issues, and improvements for the Openwork codebase.
 
 ---
 
-### SEC-002: Ollama Config Validation
+### SEC-002: Ollama Config Validation ✅ RESOLVED
 
 **File:** `apps/desktop/src/main/ipc/handlers.ts:962-998`
-**Status:** Open
 
 **Problem:** Ollama config validation is incomplete - doesn't check for empty strings, negative sizes, or invalid model names.
 
-**How to Fix:**
-1. Add check: `if (!modelId || modelId.trim() === '') throw error`
-2. Add check: `if (size < 0 || size > 1e12) throw error` (1TB max)
-3. Sanitize model names: `/^[a-zA-Z0-9_\-:./]+$/`
-4. Return specific error messages for each validation failure
+**Resolution:** Added comprehensive validation:
+1. Empty string checks for model ID and display name
+2. Size bounds validation (0 to 1TB max)
+3. Model ID format validation (alphanumeric + common separators)
+4. Display name length limit (256 chars)
+5. Maximum models limit (100) to prevent DoS
 
 ---
 
-### ERR-001: Task Summary Error Handling
+### ERR-001: Task Summary Error Handling ✅ RESOLVED
 
 **File:** `apps/desktop/src/main/ipc/handlers.ts:425-432`
-**Status:** Open
 
 **Problem:** Task summary generation is fire-and-forget. If `updateTaskSummary` fails, the error is caught but renderer still receives potentially inconsistent data.
 
-**How to Fix:**
-1. Wrap `updateTaskSummary` in try-catch separately from `forwardToRenderer`
-2. Only send to renderer if storage update succeeds
-3. Add retry logic (1-2 retries with 500ms delay)
-4. Log storage failures with task context
-
-**Code Pattern:**
-```typescript
-generateTaskSummary(prompt)
-  .then(async (summary) => {
-    try {
-      await updateTaskSummary(taskId, summary);
-      forwardToRenderer('task:summary', { taskId, summary });
-    } catch (storageError) {
-      console.error('[IPC] Failed to store summary:', storageError);
-      // Don't send to renderer if storage failed
-    }
-  })
-  .catch((err) => console.warn('[IPC] Failed to generate summary:', err));
-```
+**Resolution:** Wrapped `updateTaskSummary` in a separate try-catch block. If storage fails, the summary is not sent to renderer to avoid inconsistent state. Both storage errors and generation errors are logged with task context.
 
 ---
 
@@ -136,30 +116,17 @@ generateTaskSummary(prompt)
 
 ---
 
-### ERR-003: Playwright Installation Handling
+### ERR-003: Playwright Installation Handling ✅ RESOLVED
 
 **File:** `apps/desktop/src/main/opencode/task-manager.ts:166-173`
-**Status:** Open
 
 **Problem:** Playwright installation failures are silently caught, causing confusing downstream failures when browser automation is needed.
 
-**How to Fix:**
-1. Track installation state in a variable: `playwrightInstalled: boolean`
-2. If installation fails, set a flag and inform user via `onProgress`
-3. Before tasks that need browser, check the flag
-4. Add retry logic: Try installation up to 3 times with exponential backoff
-
-**Code Pattern:**
-```typescript
-let playwrightInstalled = false;
-try {
-  await installPlaywrightChromium(onProgress);
-  playwrightInstalled = true;
-} catch (error) {
-  console.error('[TaskManager] Playwright install failed:', error);
-  onProgress?.({ stage: 'warning', message: 'Browser automation unavailable' });
-}
-```
+**Resolution:**
+1. Added `playwrightInstallSuccess` tracking variable
+2. On installation failure, user is notified via `onProgress` with warning stage
+3. Added verification check after installation attempt
+4. Success/failure is logged for debugging
 
 ---
 
@@ -362,3 +329,6 @@ if (!result.success) {
 | 2026-02-07 | ERR-004 | Resolved - Added try-catch for race condition |
 | 2026-02-07 | TYPE-002 | Resolved - Added type guard for messages |
 | 2026-02-07 | UX-004 | Resolved - Added permission server cleanup on quit |
+| 2026-02-07 | ERR-001 | Resolved - Added proper error handling for task summary |
+| 2026-02-07 | ERR-003 | Resolved - Added user notification for Playwright install failures |
+| 2026-02-07 | SEC-002 | Resolved - Added comprehensive Ollama config validation |
