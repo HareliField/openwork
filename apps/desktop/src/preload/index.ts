@@ -152,6 +152,35 @@ const accomplishAPI = {
 
   logEvent: (payload: { level?: string; message: string; context?: Record<string, unknown> }) =>
     ipcRenderer.invoke('log:event', payload),
+
+  // Screen Capture
+  getScreenSources: (options?: { types?: ('screen' | 'window')[] }): Promise<Array<{
+    id: string;
+    name: string;
+    thumbnailDataUrl: string;
+    displayId: string;
+    appIconDataUrl?: string;
+  }>> => ipcRenderer.invoke('screen:get-sources', options),
+
+  getPrimaryDisplay: (): Promise<{
+    id: string;
+    bounds: { x: number; y: number; width: number; height: number };
+    scaleFactor: number;
+    size: { width: number; height: number };
+    workArea: { x: number; y: number; width: number; height: number };
+  }> => ipcRenderer.invoke('screen:get-primary-display'),
+
+  getAllDisplays: (): Promise<Array<{
+    id: string;
+    bounds: { x: number; y: number; width: number; height: number };
+    scaleFactor: number;
+    size: { width: number; height: number };
+    workArea: { x: number; y: number; width: number; height: number };
+    isPrimary: boolean;
+  }>> => ipcRenderer.invoke('screen:get-all-displays'),
+
+  getScreenSourceId: (displayId?: string): Promise<string | null> =>
+    ipcRenderer.invoke('screen:get-source-id', displayId),
 };
 
 // Expose the API to the renderer

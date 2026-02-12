@@ -1,5 +1,5 @@
 import { config } from 'dotenv';
-import { app, BrowserWindow, shell, ipcMain, nativeImage } from 'electron';
+import { app, BrowserWindow, shell, ipcMain, nativeImage, session, desktopCapturer } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -169,6 +169,33 @@ if (!gotTheLock) {
     // Register IPC handlers before creating window
     registerIPCHandlers();
     console.log('[Main] IPC handlers registered');
+
+    // Set up session permission handler for screen capture
+    session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+      // Allow screen capture permissions
+      const allowedPermissions = ['media', 'display-capture', 'mediaKeySystem'];
+      if (allowedPermissions.includes(permission)) {
+        callback(true);
+      } else {
+        callback(false);
+      }
+    });
+
+    // Handle display media request for screen capture
+    session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
+      desktopCapturer.getSources({ types: ['screen', 'window'] }).then((sources) => {
+        // Grant access to the first screen source by default
+        if (sources.length > 0) {
+          callback({ video: sources[0], audio: 'loopback' });
+        } else {
+          callback({});
+        }
+      }).catch((err) => {
+        console.error('[Main] Failed to get desktop sources:', err);
+        callback({});
+      });
+    });
+    console.log('[Main] Screen capture permissions configured');
 
     createWindow();
 

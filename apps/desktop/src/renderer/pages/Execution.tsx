@@ -10,11 +10,12 @@ import type { TaskMessage } from '@accomplish/shared';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card } from '@/components/ui/card';
-import { XCircle, CornerDownLeft, ArrowLeft, CheckCircle2, AlertCircle, Terminal, Wrench, FileText, Search, Code, Brain, Clock, Square, Play, Download, File } from 'lucide-react';
+import { XCircle, CornerDownLeft, ArrowLeft, CheckCircle2, AlertCircle, Terminal, Wrench, FileText, Search, Code, Brain, Clock, Square, Play, Download, File, Monitor, MonitorOff } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import ReactMarkdown from 'react-markdown';
 import { StreamingText } from '../components/ui/streaming-text';
 import { isWaitingForUser } from '../lib/waiting-detection';
+import { ScreenViewer } from '../components/screen-viewer';
 import loadingSymbol from '/assets/loading-symbol.svg';
 
 // Spinning Openwork icon component
@@ -74,6 +75,7 @@ export default function ExecutionPage() {
   const [taskRunCount, setTaskRunCount] = useState(0);
   const [currentTool, setCurrentTool] = useState<string | null>(null);
   const [currentToolInput, setCurrentToolInput] = useState<unknown>(null);
+  const [showScreenViewer, setShowScreenViewer] = useState(false);
 
   const {
     currentTask,
@@ -303,8 +305,46 @@ export default function ExecutionPage() {
               </span>
             </div>
           </div>
+          {/* Live Screen Viewer Toggle */}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowScreenViewer(!showScreenViewer)}
+            className={cn(
+              "shrink-0 no-drag gap-2",
+              showScreenViewer && "bg-primary/10 text-primary"
+            )}
+            title={showScreenViewer ? "Hide screen viewer" : "Show live screen"}
+          >
+            {showScreenViewer ? (
+              <MonitorOff className="h-4 w-4" />
+            ) : (
+              <Monitor className="h-4 w-4" />
+            )}
+            <span className="text-xs">{showScreenViewer ? "Hide Screen" : "Live Screen"}</span>
+          </Button>
         </div>
       </div>
+
+      {/* Live Screen Viewer Panel */}
+      <AnimatePresence>
+        {showScreenViewer && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={{ duration: 0.2 }}
+            className="flex-shrink-0 border-b border-border bg-zinc-950 overflow-hidden"
+          >
+            <div className="max-w-4xl mx-auto p-4">
+              <ScreenViewer
+                className="max-h-[300px]"
+                showControls={true}
+              />
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Browser installation modal - only shown during Playwright download */}
       <AnimatePresence>
