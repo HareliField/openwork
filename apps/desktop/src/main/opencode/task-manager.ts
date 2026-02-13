@@ -163,13 +163,26 @@ async function ensureDevBrowserServer(
       message: 'Chrome not found. Downloading browser (one-time setup, ~2 min)...',
     });
 
+    // ERR-003: Track installation success and inform user on failure
+    let playwrightInstallSuccess = false;
     try {
       await installPlaywrightChromium((msg) => {
         onProgress?.({ stage: 'setup', message: msg });
       });
+      playwrightInstallSuccess = true;
+      console.log('[TaskManager] Playwright Chromium installed successfully');
     } catch (error) {
       console.error('[TaskManager] Failed to install Playwright:', error);
-      // Don't throw - let agent handle the failure
+      // Inform user that browser automation may not work
+      onProgress?.({
+        stage: 'warning',
+        message: 'Browser download failed. Web automation features may be unavailable.',
+      });
+    }
+
+    // Verify installation succeeded
+    if (!playwrightInstallSuccess && !isPlaywrightInstalled()) {
+      console.warn('[TaskManager] Playwright installation failed - browser automation will not work');
     }
   }
 

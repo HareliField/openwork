@@ -318,9 +318,15 @@ export function registerIPCHandlers(): void {
     }
 
     // Setup event forwarding to renderer
+    // ERR-004: Wrap in try-catch to handle race condition where window is destroyed between check and send
     const forwardToRenderer = (channel: string, data: unknown) => {
-      if (!window.isDestroyed() && !sender.isDestroyed()) {
-        sender.send(channel, data);
+      try {
+        if (!window.isDestroyed() && !sender.isDestroyed()) {
+          sender.send(channel, data);
+        }
+      } catch (error) {
+        // Window was destroyed between the check and the send - this is expected during shutdown
+        console.debug('[IPC] Failed to forward to renderer (window destroyed):', channel);
       }
     };
 
@@ -427,14 +433,19 @@ export function registerIPCHandlers(): void {
     // Save task to history (includes the initial user message)
     saveTask(task);
 
-    // Generate AI summary asynchronously (don't block task execution)
+    // ERR-001: Generate AI summary asynchronously with proper error handling
     generateTaskSummary(validatedConfig.prompt)
-      .then((summary) => {
-        updateTaskSummary(taskId, summary);
-        forwardToRenderer('task:summary', { taskId, summary });
+      .then(async (summary) => {
+        try {
+          updateTaskSummary(taskId, summary);
+          forwardToRenderer('task:summary', { taskId, summary });
+        } catch (storageError) {
+          // Don't send to renderer if storage failed to avoid inconsistent state
+          console.error('[IPC] Failed to store task summary:', taskId, storageError);
+        }
       })
       .catch((err) => {
-        console.warn('[IPC] Failed to generate task summary:', err);
+        console.warn('[IPC] Failed to generate task summary:', taskId, err);
       });
 
     return task;
@@ -443,6 +454,9 @@ export function registerIPCHandlers(): void {
   // Task: Cancel current task (running or queued)
   handle('task:cancel', async (_event: IpcMainInvokeEvent, taskId?: string) => {
     if (!taskId) return;
+
+    // BUG-001: Always cleanup batcher when task is cancelled
+    flushAndCleanupBatcher(taskId);
 
     // Check if it's a queued task first
     if (taskManager.isTaskQueued(taskId)) {
@@ -548,9 +562,15 @@ export function registerIPCHandlers(): void {
     }
 
     // Setup event forwarding to renderer
+    // ERR-004: Wrap in try-catch to handle race condition where window is destroyed between check and send
     const forwardToRenderer = (channel: string, data: unknown) => {
-      if (!window.isDestroyed() && !sender.isDestroyed()) {
-        sender.send(channel, data);
+      try {
+        if (!window.isDestroyed() && !sender.isDestroyed()) {
+          sender.send(channel, data);
+        }
+      } catch (error) {
+        // Window was destroyed between the check and the send - this is expected during shutdown
+        console.debug('[IPC] Failed to forward to renderer (window destroyed):', channel);
       }
     };
 
@@ -667,16 +687,14 @@ export function registerIPCHandlers(): void {
       .filter((credential) => credential.account.startsWith('apiKey:'))
       .map((credential) => {
         const provider = credential.account.replace('apiKey:', '');
-        const keyPrefix =
-          credential.password && credential.password.length > 0
-            ? `${credential.password.substring(0, 8)}...`
-            : '';
+        // SEC-001: Don't expose actual key characters - use masked placeholder instead
+        const hasKey = credential.password && credential.password.length > 0;
 
         return {
           id: `local-${provider}`,
           provider,
           label: 'Local API Key',
-          keyPrefix,
+          keyPrefix: hasKey ? '••••••••...' : '',
           isActive: true,
           createdAt: new Date().toISOString(),
         };
@@ -700,7 +718,8 @@ export function registerIPCHandlers(): void {
         id: `local-${provider}`,
         provider,
         label: sanitizedLabel || 'Local API Key',
-        keyPrefix: sanitizedKey.substring(0, 8) + '...',
+        // SEC-001: Don't expose actual key characters - use masked placeholder
+        keyPrefix: '••••••••...',
         isActive: true,
         createdAt: new Date().toISOString(),
       };
@@ -725,7 +744,8 @@ export function registerIPCHandlers(): void {
   handle('api-key:set', async (_event: IpcMainInvokeEvent, key: string) => {
     const sanitizedKey = sanitizeString(key, 'apiKey', 256);
     await storeApiKey('anthropic', sanitizedKey);
-    console.log('[API Key] Key set', { keyPrefix: sanitizedKey.substring(0, 8) });
+    // SEC-001: Don't log key prefix
+    console.log('[API Key] Key set successfully');
   });
 
   // API Key: Get API key
@@ -763,7 +783,10 @@ export function registerIPCHandlers(): void {
         return { valid: true };
       }
 
-      const errorData = await response.json().catch(() => ({}));
+      const errorData = await response.json().catch((parseError) => {
+        console.warn('[API Key] Failed to parse error response:', parseError instanceof Error ? parseError.message : String(parseError));
+        return {};
+      });
       const errorMessage = (errorData as { error?: { message?: string } })?.error?.message || `API returned status ${response.status}`;
 
       console.warn('[API Key] Validation failed', { status: response.status, error: errorMessage });
@@ -857,7 +880,10 @@ export function registerIPCHandlers(): void {
         return { valid: true };
       }
 
-      const errorData = await response.json().catch(() => ({}));
+      const errorData = await response.json().catch((parseError) => {
+        console.warn(`[API Key] Failed to parse error response for ${provider}:`, parseError instanceof Error ? parseError.message : String(parseError));
+        return {};
+      });
       const errorMessage = (errorData as { error?: { message?: string } })?.error?.message || `API returned status ${response.status}`;
 
       console.warn(`[API Key] Validation failed for ${provider}`, { status: response.status, error: errorMessage });
@@ -987,14 +1013,41 @@ export function registerIPCHandlers(): void {
       if (config.lastValidated !== undefined && typeof config.lastValidated !== 'number') {
         throw new Error('Invalid Ollama configuration');
       }
-      // Validate optional models array if present
+      // SEC-002: Validate optional models array if present with comprehensive checks
       if (config.models !== undefined) {
         if (!Array.isArray(config.models)) {
           throw new Error('Invalid Ollama configuration: models must be an array');
         }
+        // Limit number of models to prevent DoS
+        if (config.models.length > 100) {
+          throw new Error('Invalid Ollama configuration: too many models (max 100)');
+        }
         for (const model of config.models) {
+          // Type checks
           if (typeof model.id !== 'string' || typeof model.displayName !== 'string' || typeof model.size !== 'number') {
             throw new Error('Invalid Ollama configuration: invalid model format');
+          }
+          // SEC-002: Validate non-empty strings
+          if (!model.id.trim()) {
+            throw new Error('Invalid Ollama configuration: model ID cannot be empty');
+          }
+          if (!model.displayName.trim()) {
+            throw new Error('Invalid Ollama configuration: model display name cannot be empty');
+          }
+          // SEC-002: Validate model ID format (alphanumeric, colons, dashes, dots, slashes)
+          if (!/^[a-zA-Z0-9_\-:.\/]+$/.test(model.id)) {
+            throw new Error('Invalid Ollama configuration: model ID contains invalid characters');
+          }
+          // SEC-002: Validate size bounds (must be positive and reasonable - max 1TB)
+          if (model.size < 0) {
+            throw new Error('Invalid Ollama configuration: model size cannot be negative');
+          }
+          if (model.size > 1e12) {
+            throw new Error('Invalid Ollama configuration: model size exceeds maximum (1TB)');
+          }
+          // Limit display name length
+          if (model.displayName.length > 256) {
+            throw new Error('Invalid Ollama configuration: display name too long (max 256 chars)');
           }
         }
       }
@@ -1006,12 +1059,13 @@ export function registerIPCHandlers(): void {
   // API Keys: Get all API keys (with masked values)
   handle('api-keys:all', async (_event: IpcMainInvokeEvent) => {
     const keys = await getAllApiKeys();
-    // Return masked versions for UI
+    // SEC-001: Return masked versions for UI - don't expose actual key characters
     const masked: Record<string, { exists: boolean; prefix?: string }> = {};
     for (const [provider, key] of Object.entries(keys)) {
       masked[provider] = {
         exists: Boolean(key),
-        prefix: key ? key.substring(0, 8) + '...' : undefined,
+        // Use masked placeholder instead of actual key prefix
+        prefix: key ? '••••••••...' : undefined,
       };
     }
     return masked;

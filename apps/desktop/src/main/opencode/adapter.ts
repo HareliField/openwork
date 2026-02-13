@@ -581,9 +581,12 @@ export class OpenCodeAdapter extends EventEmitter<OpenCodeAdapterEvents> {
         break;
 
       default:
-        // Cast to unknown to safely access type property for logging
-        const unknownMessage = message as unknown as { type: string };
-        console.log('[OpenCode Adapter] Unknown message type:', unknownMessage.type);
+        // TYPE-002: Add type guard before logging unknown message type
+        if (message && typeof message === 'object' && 'type' in message) {
+          console.log('[OpenCode Adapter] Unknown message type:', (message as { type: unknown }).type);
+        } else {
+          console.log('[OpenCode Adapter] Received malformed message without type property');
+        }
     }
   }
 

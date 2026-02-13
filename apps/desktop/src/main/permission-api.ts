@@ -24,6 +24,9 @@ const pendingPermissions = new Map<string, PendingPermission>();
 let mainWindow: BrowserWindow | null = null;
 let getActiveTaskId: (() => string | null) | null = null;
 
+// BUG-002: Store server reference for cleanup on quit
+let permissionServer: http.Server | null = null;
+
 /**
  * Initialize the permission API with dependencies
  */
@@ -147,14 +150,24 @@ export function startPermissionApiServer(): http.Server {
     };
 
     // Send to renderer
-    mainWindow.webContents.send('permission:request', permissionRequest);
+    // ERR-002: Wrap in try-catch to handle race condition where window is destroyed between check and send
+    try {
+      mainWindow.webContents.send('permission:request', permissionRequest);
+    } catch (error) {
+      // Window was destroyed - reject the permission request
+      console.warn('[Permission API] Failed to send permission request (window destroyed)');
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Window destroyed', allowed: false }));
+      return;
+    }
 
-    // Wait for user response (with 5 minute timeout)
-    const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
+    // BUG-002: Reduced timeout from 5 minutes to 2 minutes
+    const PERMISSION_TIMEOUT_MS = 2 * 60 * 1000;
 
     try {
       const allowed = await new Promise<boolean>((resolve, reject) => {
         const timeoutId = setTimeout(() => {
+          console.warn(`[Permission API] Permission request ${requestId} timed out after 2 minutes`);
           pendingPermissions.delete(requestId);
           reject(new Error('Permission request timed out'));
         }, PERMISSION_TIMEOUT_MS);
@@ -182,6 +195,9 @@ export function startPermissionApiServer(): http.Server {
     }
   });
 
+  // BUG-002: Store server reference for cleanup on quit
+  permissionServer = server;
+
   return server;
 }
 
@@ -190,4 +206,51 @@ export function startPermissionApiServer(): http.Server {
  */
 export function isFilePermissionRequest(requestId: string): boolean {
   return requestId.startsWith('filereq_');
+}
+
+/**
+ * BUG-002: Clean up all pending permissions
+ * Call this when the window is closing to avoid memory leaks
+ */
+export function cleanupPendingPermissions(): void {
+  if (pendingPermissions.size > 0) {
+    console.log(`[Permission API] Cleaning up ${pendingPermissions.size} pending permission(s)`);
+    pendingPermissions.forEach((pending, requestId) => {
+      clearTimeout(pending.timeoutId);
+      // Reject as denied since window is closing
+      pending.resolve(false);
+      console.log(`[Permission API] Rejected pending permission: ${requestId}`);
+    });
+    pendingPermissions.clear();
+  }
+}
+
+/**
+ * BUG-002/UX-004: Close the permission API server
+ * Call this on app quit to release the port
+ */
+export function closePermissionApiServer(): Promise<void> {
+  return new Promise((resolve) => {
+    cleanupPendingPermissions();
+
+    if (permissionServer) {
+      console.log('[Permission API] Closing server...');
+      permissionServer.close(() => {
+        console.log('[Permission API] Server closed');
+        permissionServer = null;
+        resolve();
+      });
+
+      // Force close after 2 seconds if graceful close hangs
+      setTimeout(() => {
+        if (permissionServer) {
+          console.warn('[Permission API] Force closing server');
+          permissionServer = null;
+          resolve();
+        }
+      }, 2000);
+    } else {
+      resolve();
+    }
+  });
 }
