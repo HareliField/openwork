@@ -6,6 +6,65 @@
  */
 
 import { contextBridge, ipcRenderer } from 'electron';
+import type {
+  DesktopControlBridgeNamespace,
+  DesktopControlStatusRequest,
+  DesktopControlStatusSnapshot,
+} from '../../../../src/shared/contracts/desktopControlBridge';
+import {
+  createDesktopControlBridgeUnavailableSnapshot,
+  createDesktopControlIpcFailureSnapshot,
+  DESKTOP_CONTROL_BRIDGE_CHANNELS,
+  normalizeDesktopControlIpcErrorMessage,
+} from '../../../../src/shared/contracts/desktopControlBridge';
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function isDesktopControlStatusSnapshot(value: unknown): value is DesktopControlStatusSnapshot {
+  if (!isRecord(value)) return false;
+  if (typeof value.status !== 'string') return false;
+  if (!isRecord(value.remediation)) return false;
+  if (!isRecord(value.cache)) return false;
+  if (!isRecord(value.checks)) return false;
+
+  const checks = value.checks;
+  return (
+    isRecord(checks.screen_capture) &&
+    isRecord(checks.action_execution) &&
+    isRecord(checks.mcp_health)
+  );
+}
+
+async function invokeDesktopControlStatus(
+  options: DesktopControlStatusRequest = {}
+): Promise<DesktopControlStatusSnapshot> {
+  if (typeof ipcRenderer.invoke !== 'function') {
+    return createDesktopControlBridgeUnavailableSnapshot(
+      'ipcRenderer.invoke is not available in preload context'
+    );
+  }
+
+  try {
+    const payload = await ipcRenderer.invoke(DESKTOP_CONTROL_BRIDGE_CHANNELS.getStatus, options);
+    if (!isDesktopControlStatusSnapshot(payload)) {
+      return createDesktopControlIpcFailureSnapshot(
+        'IPC returned malformed desktop-control readiness payload'
+      );
+    }
+    return payload;
+  } catch (error) {
+    return createDesktopControlIpcFailureSnapshot(
+      normalizeDesktopControlIpcErrorMessage(error)
+    );
+  }
+}
+
+const desktopControlBridge: DesktopControlBridgeNamespace = {
+  getStatus: (options?: DesktopControlStatusRequest) =>
+    invokeDesktopControlStatus(options ?? {}),
+};
 
 // Expose the accomplish API to the renderer
 const accomplishAPI = {
@@ -75,6 +134,13 @@ const accomplishAPI = {
     ipcRenderer.invoke('onboarding:complete'),
   setOnboardingComplete: (complete: boolean): Promise<void> =>
     ipcRenderer.invoke('onboarding:set-complete', complete),
+
+  // Desktop control readiness bridge (canonical + compatibility aliases)
+  getDesktopControlStatus: (options?: DesktopControlStatusRequest): Promise<DesktopControlStatusSnapshot> =>
+    desktopControlBridge.getStatus(options),
+  desktopControlGetStatus: (options?: DesktopControlStatusRequest): Promise<DesktopControlStatusSnapshot> =>
+    desktopControlBridge.getStatus(options),
+  desktopControl: desktopControlBridge,
 
   // OpenCode CLI status
   checkOpenCodeCli: (): Promise<{
