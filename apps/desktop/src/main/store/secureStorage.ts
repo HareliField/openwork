@@ -31,12 +31,24 @@ interface SecureStorageSchema {
 let _secureStore: Store<SecureStorageSchema> | null = null;
 let _derivedKey: Buffer | null = null;
 
+function logSecureStorageLifecycle(event: string, details: Record<string, unknown> = {}): void {
+  console.log(
+    '[SecureStorageLifecycle]',
+    JSON.stringify({
+      event,
+      timestamp: new Date().toISOString(),
+      ...details,
+    })
+  );
+}
+
 function getSecureStore(): Store<SecureStorageSchema> {
   if (!_secureStore) {
     _secureStore = new Store<SecureStorageSchema>({
       name: getStoreName(),
       defaults: { values: {} },
     });
+    logSecureStorageLifecycle('store-initialized', { storeName: getStoreName() });
   }
   return _secureStore;
 }
@@ -235,7 +247,20 @@ export function listStoredCredentials(): Array<{ account: string; password: stri
  * Clear all secure storage (used during fresh install cleanup)
  */
 export function clearSecureStorage(): void {
-  const store = getSecureStore();
+  const hadInitializedStore = _secureStore !== null;
+  const store = _secureStore ?? getSecureStore();
   store.clear();
-  _derivedKey = null; // Clear cached key
+  _secureStore = null;
+  _derivedKey = null;
+  logSecureStorageLifecycle('store-cleared', { hadInitializedStore });
+}
+
+/**
+ * Reset in-memory secure storage runtime state without clearing persisted data.
+ * Useful for deterministic startup and restart flows.
+ */
+export function resetSecureStorageRuntimeState(): void {
+  _secureStore = null;
+  _derivedKey = null;
+  logSecureStorageLifecycle('runtime-reset');
 }

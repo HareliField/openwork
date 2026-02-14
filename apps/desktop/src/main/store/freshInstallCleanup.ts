@@ -1,8 +1,7 @@
 import { app } from 'electron';
 import fs from 'fs';
 import path from 'path';
-import { clearAppSettings } from './appSettings';
-import { clearTaskHistoryStore } from './taskHistory';
+import { clearAppSettings, clearScreenAgentLifecycleState } from './appSettings';
 import { clearSecureStorage } from './secureStorage';
 
 /**
@@ -25,6 +24,35 @@ interface InstallMarker {
   version: string;
   /** Timestamp when marker was created */
   markerCreated: string;
+}
+
+function logFreshInstallLifecycle(event: string, details: Record<string, unknown> = {}): void {
+  console.log(
+    '[FreshInstallLifecycle]',
+    JSON.stringify({
+      event,
+      timestamp: new Date().toISOString(),
+      ...details,
+    })
+  );
+}
+
+function logFreshInstallLifecycleError(
+  event: string,
+  error: unknown,
+  details: Record<string, unknown> = {}
+): void {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(
+    '[FreshInstallLifecycle]',
+    JSON.stringify({
+      event,
+      level: 'error',
+      timestamp: new Date().toISOString(),
+      message,
+      ...details,
+    })
+  );
 }
 
 function getKnownUserDataDirs(): string[] {
@@ -123,7 +151,7 @@ function writeInstallMarker(marker: InstallMarker): void {
  */
 function hasExistingUserData(): boolean {
   const dataDirs = getKnownUserDataDirs();
-  const storeFiles = ['app-settings.json', 'task-history.json'];
+  const storeFiles = ['app-settings.json'];
 
   return dataDirs.some((dir) =>
     storeFiles.some((file) => fs.existsSync(path.join(dir, file)))
@@ -134,22 +162,18 @@ function hasExistingUserData(): boolean {
  * Clear all user data from previous installation
  */
 function clearPreviousInstallData(): void {
-  console.log('[FreshInstall] Clearing data from previous installation...');
+  logFreshInstallLifecycle('cleanup-started');
 
   // Clear electron-store data using the store APIs
   // This is important because stores are already initialized in memory
   try {
     clearAppSettings();
+    if (typeof clearScreenAgentLifecycleState === 'function') {
+      clearScreenAgentLifecycleState();
+    }
     console.log('[FreshInstall]   - Cleared app settings store');
   } catch (err) {
-    console.error('[FreshInstall]   - Failed to clear app settings:', err);
-  }
-
-  try {
-    clearTaskHistoryStore();
-    console.log('[FreshInstall]   - Cleared task history store');
-  } catch (err) {
-    console.error('[FreshInstall]   - Failed to clear task history:', err);
+    logFreshInstallLifecycleError('cleanup-app-settings-failed', err);
   }
 
   // Also delete any other config files that might exist
@@ -164,13 +188,13 @@ function clearPreviousInstallData(): void {
         console.log(`[FreshInstall]   - Removed: ${file}`);
       }
     } catch (err) {
-      console.error(`[FreshInstall]   - Failed to remove ${file}:`, err);
+      logFreshInstallLifecycleError('cleanup-file-remove-failed', err, { filePath });
     }
   }
 
   // Remove legacy data files from known previous locations
   const legacyDirs = getKnownUserDataDirs().filter((dir) => dir !== userDataPath);
-  const legacyFiles = ['app-settings.json', 'task-history.json', 'config.json', '.install-marker.json'];
+  const legacyFiles = ['app-settings.json', 'config.json', '.install-marker.json'];
   for (const dir of legacyDirs) {
     for (const file of legacyFiles) {
       const filePath = path.join(dir, file);
@@ -180,7 +204,7 @@ function clearPreviousInstallData(): void {
           console.log(`[FreshInstall]   - Removed legacy ${file} from ${dir}`);
         }
       } catch (err) {
-        console.error(`[FreshInstall]   - Failed to remove legacy ${file} from ${dir}:`, err);
+        logFreshInstallLifecycleError('cleanup-legacy-file-remove-failed', err, { filePath });
       }
     }
   }
@@ -190,10 +214,10 @@ function clearPreviousInstallData(): void {
     clearSecureStorage();
     console.log('[FreshInstall]   - Cleared secure storage');
   } catch (err) {
-    console.error('[FreshInstall]   - Failed to clear secure storage:', err);
+    logFreshInstallLifecycleError('cleanup-secure-storage-failed', err);
   }
 
-  console.log('[FreshInstall] Previous installation data cleared');
+  logFreshInstallLifecycle('cleanup-completed');
 }
 
 /**
@@ -205,13 +229,13 @@ function clearPreviousInstallData(): void {
 export async function checkAndCleanupFreshInstall(): Promise<boolean> {
   // Skip in development mode
   if (!app.isPackaged) {
-    console.log('[FreshInstall] Skipping fresh install check in dev mode');
+    logFreshInstallLifecycle('check-skipped-dev-mode');
     return false;
   }
 
   const bundleMtime = getAppBundleMtime();
   if (!bundleMtime) {
-    console.log('[FreshInstall] Could not determine bundle mtime, skipping check');
+    logFreshInstallLifecycle('check-skipped-no-bundle-mtime');
     return false;
   }
 
@@ -224,10 +248,10 @@ export async function checkAndCleanupFreshInstall(): Promise<boolean> {
     // Check if there's existing user data (from a previous install)
     const hadExistingData = hasExistingUserData();
     if (hadExistingData) {
-      console.log('[FreshInstall] Found existing data but no install marker - this is a reinstall');
+      logFreshInstallLifecycle('reinstall-detected-no-marker');
       clearPreviousInstallData();
     } else {
-      console.log('[FreshInstall] First time install (no previous data)');
+      logFreshInstallLifecycle('first-install-detected');
     }
 
     // Create the install marker
@@ -242,9 +266,10 @@ export async function checkAndCleanupFreshInstall(): Promise<boolean> {
 
   // Case 2: Marker exists, check if bundle has changed
   if (existingMarker.bundleMtime !== currentMtimeStr) {
-    console.log('[FreshInstall] App bundle has changed since last run');
-    console.log(`[FreshInstall]   Previous: ${existingMarker.bundleMtime}`);
-    console.log(`[FreshInstall]   Current:  ${currentMtimeStr}`);
+    logFreshInstallLifecycle('bundle-change-detected', {
+      previousBundleMtime: existingMarker.bundleMtime,
+      currentBundleMtime: currentMtimeStr,
+    });
 
     // Clear old data
     clearPreviousInstallData();
@@ -260,6 +285,6 @@ export async function checkAndCleanupFreshInstall(): Promise<boolean> {
   }
 
   // Case 3: Same installation, no cleanup needed
-  console.log('[FreshInstall] Same installation detected, no cleanup needed');
+  logFreshInstallLifecycle('same-installation-no-cleanup');
   return false;
 }

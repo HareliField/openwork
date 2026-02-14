@@ -1,6 +1,30 @@
 import Store from 'electron-store';
 import type { SelectedModel, OllamaConfig } from '@accomplish/shared';
 
+export interface ScreenAgentLifecycleState {
+  /** Unique ID for the current process run */
+  runId: string | null;
+  /** Number of non-idempotent startups observed */
+  startupCount: number;
+  /** Number of non-idempotent restarts observed */
+  restartCount: number;
+  /** ISO timestamp of the last startup transition */
+  lastStartupAt: string | null;
+  /** ISO timestamp of the last restart transition */
+  lastRestartAt: string | null;
+  /** Restart token used to dedupe repeated restart requests */
+  lastRestartToken: string | null;
+}
+
+const DEFAULT_SCREEN_AGENT_LIFECYCLE_STATE: ScreenAgentLifecycleState = {
+  runId: null,
+  startupCount: 0,
+  restartCount: 0,
+  lastStartupAt: null,
+  lastRestartAt: null,
+  lastRestartToken: null,
+};
+
 /**
  * App settings schema
  */
@@ -9,10 +33,16 @@ interface AppSettingsSchema {
   debugMode: boolean;
   /** Whether the user has completed the onboarding wizard */
   onboardingComplete: boolean;
+  /** Feature flag to enable desktop control preflight checks */
+  desktopControlPreflight: boolean;
+  /** Feature flag to enable sampled live screen sessions */
+  liveScreenSampling: boolean;
   /** Selected AI model (provider/model format) */
   selectedModel: SelectedModel | null;
   /** Ollama server configuration */
   ollamaConfig: OllamaConfig | null;
+  /** Screen Agent lifecycle metadata for deterministic restart/recheck flow */
+  screenAgentLifecycle: ScreenAgentLifecycleState;
 }
 
 const appSettingsStore = new Store<AppSettingsSchema>({
@@ -20,13 +50,23 @@ const appSettingsStore = new Store<AppSettingsSchema>({
   defaults: {
     debugMode: false,
     onboardingComplete: false,
+    // Conservative rollout defaults: both features are opt-in.
+    desktopControlPreflight: false,
+    liveScreenSampling: false,
     selectedModel: {
       provider: 'anthropic',
       model: 'anthropic/claude-opus-4-5',
     },
     ollamaConfig: null,
+    screenAgentLifecycle: { ...DEFAULT_SCREEN_AGENT_LIFECYCLE_STATE },
   },
 });
+
+function cloneLifecycleState(state: ScreenAgentLifecycleState): ScreenAgentLifecycleState {
+  return {
+    ...state,
+  };
+}
 
 /**
  * Get debug mode setting
@@ -54,6 +94,34 @@ export function getOnboardingComplete(): boolean {
  */
 export function setOnboardingComplete(complete: boolean): void {
   appSettingsStore.set('onboardingComplete', complete);
+}
+
+/**
+ * Get desktop control preflight feature flag
+ */
+export function getDesktopControlPreflight(): boolean {
+  return appSettingsStore.get('desktopControlPreflight');
+}
+
+/**
+ * Set desktop control preflight feature flag
+ */
+export function setDesktopControlPreflight(enabled: boolean): void {
+  appSettingsStore.set('desktopControlPreflight', enabled);
+}
+
+/**
+ * Get live screen sampling feature flag
+ */
+export function getLiveScreenSampling(): boolean {
+  return appSettingsStore.get('liveScreenSampling');
+}
+
+/**
+ * Set live screen sampling feature flag
+ */
+export function setLiveScreenSampling(enabled: boolean): void {
+  appSettingsStore.set('liveScreenSampling', enabled);
 }
 
 /**
@@ -85,14 +153,78 @@ export function setOllamaConfig(config: OllamaConfig | null): void {
 }
 
 /**
+ * Get the persisted screen-agent lifecycle state.
+ */
+export function getScreenAgentLifecycleState(): ScreenAgentLifecycleState {
+  return cloneLifecycleState(appSettingsStore.get('screenAgentLifecycle'));
+}
+
+/**
+ * Record a startup transition in an idempotent way for a run ID.
+ */
+export function recordScreenAgentStartup(
+  runId: string,
+  startedAt: string
+): ScreenAgentLifecycleState {
+  const current = getScreenAgentLifecycleState();
+  if (current.runId === runId) {
+    return current;
+  }
+
+  const next: ScreenAgentLifecycleState = {
+    ...current,
+    runId,
+    startupCount: current.startupCount + 1,
+    lastStartupAt: startedAt,
+    lastRestartToken: null,
+  };
+  appSettingsStore.set('screenAgentLifecycle', next);
+  return cloneLifecycleState(next);
+}
+
+/**
+ * Record a restart transition in an idempotent way for a run ID and token.
+ */
+export function recordScreenAgentRestart(
+  runId: string,
+  restartToken: string,
+  restartedAt: string
+): ScreenAgentLifecycleState {
+  const current = getScreenAgentLifecycleState();
+  if (current.runId === runId && current.lastRestartToken === restartToken) {
+    return current;
+  }
+
+  const next: ScreenAgentLifecycleState = {
+    ...current,
+    runId,
+    restartCount: current.restartCount + 1,
+    lastRestartAt: restartedAt,
+    lastRestartToken: restartToken,
+  };
+  appSettingsStore.set('screenAgentLifecycle', next);
+  return cloneLifecycleState(next);
+}
+
+/**
+ * Clear only lifecycle metadata while keeping other user settings.
+ */
+export function clearScreenAgentLifecycleState(): void {
+  appSettingsStore.set('screenAgentLifecycle', { ...DEFAULT_SCREEN_AGENT_LIFECYCLE_STATE });
+}
+
+/**
  * Get all app settings
  */
 export function getAppSettings(): AppSettingsSchema {
   return {
     debugMode: appSettingsStore.get('debugMode'),
     onboardingComplete: appSettingsStore.get('onboardingComplete'),
+    desktopControlPreflight: appSettingsStore.get('desktopControlPreflight'),
+    liveScreenSampling: appSettingsStore.get('liveScreenSampling'),
     selectedModel: appSettingsStore.get('selectedModel'),
     ollamaConfig: appSettingsStore.get('ollamaConfig'),
+    screenAgentLifecycle: cloneLifecycleState(appSettingsStore.get('screenAgentLifecycle')),
   };
 }
 
