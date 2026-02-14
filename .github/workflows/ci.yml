@@ -5,6 +5,9 @@ on:
     branches: [main]
     paths:
       - 'apps/desktop/**'
+      - 'tests/desktop-control/**'
+      - 'scripts/desktop-control-healthcheck/**'
+      - 'electron-builder/**'
       - 'packages/**'
       - 'pnpm-lock.yaml'
       - '.github/workflows/ci.yml'
@@ -12,6 +15,9 @@ on:
     branches: [main]
     paths:
       - 'apps/desktop/**'
+      - 'tests/desktop-control/**'
+      - 'scripts/desktop-control-healthcheck/**'
+      - 'electron-builder/**'
       - 'packages/**'
       - 'pnpm-lock.yaml'
       - '.github/workflows/ci.yml'
@@ -160,4 +166,56 @@ jobs:
         with:
           name: e2e-screenshots
           path: apps/desktop/e2e/test-results/screenshots/
+          retention-days: 7
+
+  desktop-control-guardrails:
+    name: Desktop Control Guardrails
+    runs-on: macos-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: pnpm -F @accomplish/desktop exec playwright install --with-deps
+
+      - name: Build desktop app
+        run: pnpm -F @accomplish/desktop build
+
+      - name: Run preload + IPC startup healthcheck
+        run: pnpm --dir apps/desktop exec node ../../scripts/desktop-control-healthcheck/startup-healthcheck.mjs
+        env:
+          E2E_SKIP_AUTH: '1'
+          E2E_MOCK_TASK_EVENTS: '1'
+          CI: true
+
+      - name: Run renderer bridge E2E guard
+        run: pnpm --dir apps/desktop exec playwright test --config ../../tests/desktop-control/playwright.config.ts
+        env:
+          E2E_SKIP_AUTH: '1'
+          E2E_MOCK_TASK_EVENTS: '1'
+          CI: true
+
+      - name: Upload desktop-control guardrail artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-control-guardrail-results
+          path: |
+            tests/desktop-control/artifacts/test-results/
+            tests/desktop-control/artifacts/html-report/
+            tests/desktop-control/artifacts/test-results.json
           retention-days: 7
