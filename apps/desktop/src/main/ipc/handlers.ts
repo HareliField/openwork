@@ -27,6 +27,12 @@ import {
   setSelectedModel,
   getOllamaConfig,
   setOllamaConfig,
+  getAllowMouseControl,
+  setAllowMouseControl,
+  getAllowDesktopContext,
+  setAllowDesktopContext,
+  getDesktopContextBackgroundPolling,
+  setDesktopContextBackgroundPolling,
 } from '../store/appSettings';
 import {
   startPermissionApiServer,
@@ -43,6 +49,8 @@ import type {
   TaskStatus,
   SelectedModel,
   OllamaConfig,
+  MouseMovePayload,
+  MouseClickPayload,
 } from '@accomplish/shared';
 import {
   normalizeIpcError,
@@ -54,6 +62,23 @@ import {
   desktopControlStatusResponseSchema,
 } from './validation';
 import { getDesktopControlStatus } from '../desktop-control/preflight';
+import {
+  getScreenSources,
+  getPrimaryDisplay,
+  getAllDisplays,
+  getScreenSourceId,
+} from '../services/screen-capture';
+import { getDesktopContextService } from '../services/desktop-context-service';
+import {
+  initializeDesktopContextPolling,
+  getDesktopContextPollingService,
+} from '../services/desktop-context-polling';
+import type {
+  DesktopContextOptions,
+  DesktopWindow,
+  AccessibleNode,
+  DesktopScreenshot,
+} from '@accomplish/shared';
 
 const MAX_TEXT_LENGTH = 8000;
 const ALLOWED_API_KEY_PROVIDERS = new Set([
@@ -901,6 +926,44 @@ export function registerIPCHandlers(): void {
     return getAppSettings();
   });
 
+  // Settings: Set allowMouseControl flag
+  handle('settings:set-allow-mouse-control', async (_event: IpcMainInvokeEvent, enabled: boolean) => {
+    if (typeof enabled !== 'boolean') {
+      throw new Error('Invalid allowMouseControl flag');
+    }
+    setAllowMouseControl(enabled);
+  });
+
+  // Settings: Get allowDesktopContext flag
+  handle('settings:get-allow-desktop-context', async (_event: IpcMainInvokeEvent) => {
+    return getAllowDesktopContext();
+  });
+
+  // Settings: Set allowDesktopContext flag
+  handle('settings:set-allow-desktop-context', async (_event: IpcMainInvokeEvent, enabled: boolean) => {
+    if (typeof enabled !== 'boolean') {
+      throw new Error('Invalid allowDesktopContext flag');
+    }
+    setAllowDesktopContext(enabled);
+    // Initialize or stop polling based on new setting
+    initializeDesktopContextPolling();
+  });
+
+  // Settings: Get desktopContextBackgroundPolling flag
+  handle('settings:get-desktop-context-background-polling', async (_event: IpcMainInvokeEvent) => {
+    return getDesktopContextBackgroundPolling();
+  });
+
+  // Settings: Set desktopContextBackgroundPolling flag
+  handle('settings:set-desktop-context-background-polling', async (_event: IpcMainInvokeEvent, enabled: boolean) => {
+    if (typeof enabled !== 'boolean') {
+      throw new Error('Invalid desktopContextBackgroundPolling flag');
+    }
+    setDesktopContextBackgroundPolling(enabled);
+    // Initialize or stop polling based on new setting
+    initializeDesktopContextPolling();
+  });
+
   // Onboarding: Get onboarding complete status
   handle('onboarding:complete', async (_event: IpcMainInvokeEvent) => {
     return getOnboardingComplete();
@@ -924,30 +987,35 @@ export function registerIPCHandlers(): void {
       throw error;
     }
   });
-<<<<<<< HEAD
 
   // Log event handler - now just returns ok (no external logging)
   handle(
     'log:event',
-    async (_event: IpcMainInvokeEvent, _payload: { level?: string; message?: string; context?: Record<string, unknown> }) => {
+    async (
+      _event: IpcMainInvokeEvent,
+      _payload: { level?: string; message?: string; context?: Record<string, unknown> }
+    ) => {
       // No-op: external logging removed
       return { ok: true };
     }
   );
 
   // Screen Capture: Get available screen sources
-  handle('screen:get-sources', async (_event: IpcMainInvokeEvent, options?: { types?: ('screen' | 'window')[] }) => {
-    try {
-      return await getScreenSources({
-        types: options?.types || ['screen', 'window'],
-        thumbnailSize: { width: 320, height: 180 },
-        fetchWindowIcons: true,
-      });
-    } catch (error) {
-      console.error('[IPC] Failed to get screen sources:', error);
-      throw error;
+  handle(
+    'screen:get-sources',
+    async (_event: IpcMainInvokeEvent, options?: { types?: ('screen' | 'window')[] }) => {
+      try {
+        return await getScreenSources({
+          types: options?.types || ['screen', 'window'],
+          thumbnailSize: { width: 320, height: 180 },
+          fetchWindowIcons: true,
+        });
+      } catch (error) {
+        console.error('[IPC] Failed to get screen sources:', error);
+        throw error;
+      }
     }
-  });
+  );
 
   // Screen Capture: Get primary display info
   handle('screen:get-primary-display', async (_event: IpcMainInvokeEvent) => {
@@ -968,8 +1036,131 @@ export function registerIPCHandlers(): void {
       throw error;
     }
   });
-=======
->>>>>>> 579c22c (Add .env.example and bugs/features tracker)
+
+  // Desktop Context: List all windows
+  handle('desktop:listWindows', async (_event: IpcMainInvokeEvent) => {
+    try {
+      const service = getDesktopContextService();
+      const windows = await service.listWindows();
+      return windows;
+    } catch (error) {
+      console.error('[IPC] Failed to list windows:', error);
+      throw error;
+    }
+  });
+
+  // Desktop Context: Inspect window accessibility tree
+  handle(
+    'desktop:inspectWindow',
+    async (
+      _event: IpcMainInvokeEvent,
+      windowId: number,
+      maxDepth?: number,
+      maxNodes?: number
+    ) => {
+      if (typeof windowId !== 'number' || !Number.isInteger(windowId)) {
+        throw new Error('Invalid windowId');
+      }
+      try {
+        const service = getDesktopContextService();
+        const tree = await service.inspectWindow(
+          windowId,
+          maxDepth ?? 10,
+          maxNodes ?? 1000
+        );
+        return tree;
+      } catch (error) {
+        console.error(`[IPC] Failed to inspect window ${windowId}:`, error);
+        throw error;
+      }
+    }
+  );
+
+  // Desktop Context: Capture screenshot
+  handle(
+    'desktop:capture',
+    async (
+      _event: IpcMainInvokeEvent,
+      options: {
+        mode: 'screen' | 'window' | 'region';
+        windowId?: number;
+        rect?: { x: number; y: number; width: number; height: number };
+      }
+    ) => {
+      if (!options || typeof options.mode !== 'string') {
+        throw new Error('Invalid capture options');
+      }
+      try {
+        const service = getDesktopContextService();
+        const screenshot = await service.captureScreenshot(
+          options.mode,
+          options.windowId,
+          options.rect
+        );
+        return screenshot;
+      } catch (error) {
+        console.error('[IPC] Failed to capture screenshot:', error);
+        throw error;
+      }
+    }
+  );
+
+  // Desktop Context: Get full context snapshot
+  handle(
+    'desktop:getContext',
+    async (_event: IpcMainInvokeEvent, options?: DesktopContextOptions) => {
+      try {
+        const service = getDesktopContextService();
+        const context = await service.getDesktopContext(options ?? {});
+        return {
+          timestamp: new Date().toISOString(),
+          ...context,
+        };
+      } catch (error) {
+        console.error('[IPC] Failed to get desktop context:', error);
+        throw error;
+      }
+    }
+  );
+
+  // Mouse control: move and click (gated by allowMouseControl setting)
+  handle('mouse:move', async (_event: IpcMainInvokeEvent, payload: MouseMovePayload) => {
+    if (!getAllowMouseControl()) {
+      throw new Error('Mouse control is disabled in settings');
+    }
+
+    if (
+      !payload ||
+      typeof payload.x !== 'number' ||
+      typeof payload.y !== 'number' ||
+      !Number.isFinite(payload.x) ||
+      !Number.isFinite(payload.y)
+    ) {
+      throw new Error('Invalid mouse move payload');
+    }
+
+    // TODO: Implement mouse movement via native automation library
+    // This is a placeholder to keep IPC shape stable without changing behavior yet.
+    return { ok: true };
+  });
+
+  handle('mouse:click', async (_event: IpcMainInvokeEvent, payload: MouseClickPayload) => {
+    if (!getAllowMouseControl()) {
+      throw new Error('Mouse control is disabled in settings');
+    }
+
+    if (!payload || typeof payload.button !== 'string') {
+      throw new Error('Invalid mouse click payload');
+    }
+
+    if (!['left', 'right', 'middle'].includes(payload.button)) {
+      throw new Error('Unsupported mouse button');
+    }
+
+    // TODO: Implement mouse click via native automation library
+    // This is a placeholder to keep IPC shape stable without changing behavior yet.
+    return { ok: true };
+  });
 }
 
 function createTaskId(): string {

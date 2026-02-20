@@ -57,12 +57,47 @@ const PERMISSION_ERROR_PATTERNS = [
 
 const PYTHON_MOVE_MOUSE_SCRIPT = `
 import Quartz
+import math
 import sys
+import time
 
-x = float(sys.argv[1])
-y = float(sys.argv[2])
-event = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, (x, y), Quartz.kCGMouseButtonLeft)
-Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+target_x = float(sys.argv[1])
+target_y = float(sys.argv[2])
+
+current_event = Quartz.CGEventCreate(None)
+if current_event is None:
+    start_x = target_x
+    start_y = target_y
+else:
+    current_location = Quartz.CGEventGetLocation(current_event)
+    start_x = float(current_location.x)
+    start_y = float(current_location.y)
+
+dx = target_x - start_x
+dy = target_y - start_y
+distance = math.hypot(dx, dy)
+
+if distance <= 18.0:
+    event = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, (target_x, target_y), Quartz.kCGMouseButtonLeft)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+    sys.exit(0)
+
+# Keep cursor motion visible without making the interaction feel sluggish.
+duration_ms = max(120.0, min(450.0, distance * 0.55))
+steps = int(max(6, min(45, round(distance / 22.0))))
+sleep_seconds = (duration_ms / 1000.0) / steps
+
+for step in range(1, steps + 1):
+    linear_progress = step / steps
+    eased_progress = 0.5 - (0.5 * math.cos(math.pi * linear_progress))
+    next_x = start_x + (dx * eased_progress)
+    next_y = start_y + (dy * eased_progress)
+    event = Quartz.CGEventCreateMouseEvent(
+        None, Quartz.kCGEventMouseMoved, (next_x, next_y), Quartz.kCGMouseButtonLeft
+    )
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+    if step < steps:
+        time.sleep(sleep_seconds)
 `.trim();
 
 const PYTHON_CLICK_SCRIPT = `
@@ -517,6 +552,7 @@ async function moveMouse(x: number, y: number): Promise<void> {
  * Click at a specific position
  */
 async function click(x: number, y: number, button: MouseButton = 'left'): Promise<void> {
+  await moveMouse(x, y);
   await runPythonScript(PYTHON_CLICK_SCRIPT, [String(x), String(y), button], {
     action: 'click',
     x,
@@ -529,6 +565,7 @@ async function click(x: number, y: number, button: MouseButton = 'left'): Promis
  * Double-click at a specific position
  */
 async function doubleClick(x: number, y: number): Promise<void> {
+  await moveMouse(x, y);
   await runPythonScript(PYTHON_DOUBLE_CLICK_SCRIPT, [String(x), String(y)], {
     action: 'double_click',
     x,

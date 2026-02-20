@@ -37,6 +37,12 @@ interface AppSettingsSchema {
   desktopControlPreflight: boolean;
   /** Feature flag to enable sampled live screen sessions */
   liveScreenSampling: boolean;
+  /** Allow agent to control mouse and keyboard via desktop actions */
+  allowMouseControl: boolean;
+  /** Allow agent to see other apps' windows (requires Accessibility and Screen Recording permissions) */
+  allowDesktopContext: boolean;
+  /** Enable background polling for desktop context (always-on mode) */
+  desktopContextBackgroundPolling: boolean;
   /** Selected AI model (provider/model format) */
   selectedModel: SelectedModel | null;
   /** Ollama server configuration */
@@ -53,6 +59,9 @@ const appSettingsStore = new Store<AppSettingsSchema>({
     // Conservative rollout defaults: both features are opt-in.
     desktopControlPreflight: false,
     liveScreenSampling: false,
+    allowMouseControl: false,
+    allowDesktopContext: false,
+    desktopContextBackgroundPolling: false,
     selectedModel: {
       provider: 'anthropic',
       model: 'anthropic/claude-opus-4-5',
@@ -222,10 +231,55 @@ export function getAppSettings(): AppSettingsSchema {
     onboardingComplete: appSettingsStore.get('onboardingComplete'),
     desktopControlPreflight: appSettingsStore.get('desktopControlPreflight'),
     liveScreenSampling: appSettingsStore.get('liveScreenSampling'),
+    allowMouseControl: appSettingsStore.get('allowMouseControl'),
+    allowDesktopContext: appSettingsStore.get('allowDesktopContext'),
+    desktopContextBackgroundPolling: appSettingsStore.get('desktopContextBackgroundPolling'),
     selectedModel: appSettingsStore.get('selectedModel'),
     ollamaConfig: appSettingsStore.get('ollamaConfig'),
     screenAgentLifecycle: cloneLifecycleState(appSettingsStore.get('screenAgentLifecycle')),
   };
+}
+
+/**
+ * Get allowMouseControl feature flag
+ */
+export function getAllowMouseControl(): boolean {
+  return appSettingsStore.get('allowMouseControl');
+}
+
+/**
+ * Set allowMouseControl feature flag
+ */
+export function setAllowMouseControl(enabled: boolean): void {
+  appSettingsStore.set('allowMouseControl', enabled);
+}
+
+/**
+ * Get allowDesktopContext feature flag
+ */
+export function getAllowDesktopContext(): boolean {
+  return appSettingsStore.get('allowDesktopContext');
+}
+
+/**
+ * Set allowDesktopContext feature flag
+ */
+export function setAllowDesktopContext(enabled: boolean): void {
+  appSettingsStore.set('allowDesktopContext', enabled);
+}
+
+/**
+ * Get desktopContextBackgroundPolling feature flag
+ */
+export function getDesktopContextBackgroundPolling(): boolean {
+  return appSettingsStore.get('desktopContextBackgroundPolling');
+}
+
+/**
+ * Set desktopContextBackgroundPolling feature flag
+ */
+export function setDesktopContextBackgroundPolling(enabled: boolean): void {
+  appSettingsStore.set('desktopContextBackgroundPolling', enabled);
 }
 
 /**

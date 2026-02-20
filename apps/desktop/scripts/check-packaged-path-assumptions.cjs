@@ -22,6 +22,14 @@ const PACKAGE_JSON = JSON.parse(
   fs.readFileSync(path.join(PROJECT_ROOT, 'package.json'), 'utf8')
 );
 const PRODUCT_FILENAME = PACKAGE_JSON.build?.productName;
+const HAS_DESKTOP_CONTEXT_HELPER_RESOURCE = Array.isArray(PACKAGE_JSON.build?.extraResources)
+  && PACKAGE_JSON.build.extraResources.some(
+    (entry) =>
+      entry
+      && typeof entry === 'object'
+      && entry.from === 'resources/desktop-context-helper'
+      && entry.to === 'desktop-context-helper'
+  );
 
 if (!NODE_VERSION) {
   throw new Error('[packaged-path-check] Missing NODE_VERSION constant in after-pack.cjs');
@@ -30,6 +38,12 @@ if (!NODE_VERSION) {
 if (!PRODUCT_FILENAME) {
   throw new Error(
     '[packaged-path-check] Missing build.productName in apps/desktop/package.json'
+  );
+}
+
+if (!HAS_DESKTOP_CONTEXT_HELPER_RESOURCE) {
+  throw new Error(
+    '[packaged-path-check] Missing desktop-context helper extraResource mapping in apps/desktop/package.json'
   );
 }
 

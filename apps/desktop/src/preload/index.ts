@@ -114,6 +114,16 @@ const accomplishAPI = {
     ipcRenderer.invoke('settings:set-debug-mode', enabled),
   getAppSettings: (): Promise<{ debugMode: boolean; onboardingComplete: boolean }> =>
     ipcRenderer.invoke('settings:app-settings'),
+  setAllowMouseControl: (enabled: boolean): Promise<void> =>
+    ipcRenderer.invoke('settings:set-allow-mouse-control', enabled),
+  getAllowDesktopContext: (): Promise<boolean> =>
+    ipcRenderer.invoke('settings:get-allow-desktop-context'),
+  setAllowDesktopContext: (enabled: boolean): Promise<void> =>
+    ipcRenderer.invoke('settings:set-allow-desktop-context', enabled),
+  getDesktopContextBackgroundPolling: (): Promise<boolean> =>
+    ipcRenderer.invoke('settings:get-desktop-context-background-polling'),
+  setDesktopContextBackgroundPolling: (enabled: boolean): Promise<void> =>
+    ipcRenderer.invoke('settings:set-desktop-context-background-polling', enabled),
 
   // API Key management (new simplified handlers)
   hasApiKey: (): Promise<boolean> =>
@@ -226,6 +236,10 @@ const accomplishAPI = {
     ipcRenderer.invoke('window:minimize'),
   showWindow: (): Promise<void> =>
     ipcRenderer.invoke('window:show'),
+  collapseToIconWindow: (): Promise<void> =>
+    ipcRenderer.invoke('window:collapse-to-icon'),
+  expandFromIconWindow: (): Promise<void> =>
+    ipcRenderer.invoke('window:expand-from-icon'),
 
   // Smart trigger
   getSmartTriggerConfig: (): Promise<{
@@ -245,6 +259,31 @@ const accomplishAPI = {
     const listener = (_: unknown, data: { reason: string; timestamp: number }) => callback(data);
     ipcRenderer.on('smart-trigger:triggered', listener);
     return () => ipcRenderer.removeListener('smart-trigger:triggered', listener);
+  },
+
+  // Mouse control (gated by allowMouseControl setting in main process)
+  mouse: {
+    move: (payload: { x: number; y: number }): Promise<{ ok: true }> =>
+      ipcRenderer.invoke('mouse:move', payload),
+    click: (payload: { button: 'left' | 'right' | 'middle' }): Promise<{ ok: true }> =>
+      ipcRenderer.invoke('mouse:click', payload),
+  },
+
+  // Desktop context: List windows, inspect accessibility, capture screenshots
+  desktop: {
+    listWindows: (): Promise<unknown[]> => ipcRenderer.invoke('desktop:listWindows'),
+    inspectWindow: (
+      windowId: number,
+      maxDepth?: number,
+      maxNodes?: number
+    ): Promise<unknown> => ipcRenderer.invoke('desktop:inspectWindow', windowId, maxDepth, maxNodes),
+    capture: (options: {
+      mode: 'screen' | 'window' | 'region';
+      windowId?: number;
+      rect?: { x: number; y: number; width: number; height: number };
+    }): Promise<unknown> => ipcRenderer.invoke('desktop:capture', options),
+    getContext: (options?: unknown): Promise<unknown> =>
+      ipcRenderer.invoke('desktop:getContext', options),
   },
 };
 

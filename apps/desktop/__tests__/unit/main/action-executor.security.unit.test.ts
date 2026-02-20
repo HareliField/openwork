@@ -19,11 +19,16 @@ describe('Action Executor Security Regression', () => {
   });
 
   it('routes move_mouse coordinates through Python argv values', () => {
-    expect(actionExecutorSource).toContain('x = float(sys.argv[1])');
-    expect(actionExecutorSource).toContain('y = float(sys.argv[2])');
+    expect(actionExecutorSource).toContain('target_x = float(sys.argv[1])');
+    expect(actionExecutorSource).toContain('target_y = float(sys.argv[2])');
     expect(actionExecutorSource).toContain(
       'await runPythonScript(PYTHON_MOVE_MOUSE_SCRIPT, [String(x), String(y)], {'
     );
+  });
+
+  it('moves pointer before click actions so movement is visible', () => {
+    const moveCalls = actionExecutorSource.match(/await moveMouse\(x, y\);/g) ?? [];
+    expect(moveCalls.length).toBeGreaterThanOrEqual(2);
   });
 
   it('uses execFile argument arrays for subprocess execution', () => {

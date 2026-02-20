@@ -15,7 +15,13 @@ import type {
   TaskProgress,
   ApiKeyConfig,
   TaskMessage,
+  DesktopWindow,
+  AccessibleNode,
+  DesktopScreenshot,
+  DesktopContextOptions,
+  DesktopContextSnapshot,
 } from '@accomplish/shared';
+import type { MouseMovePayload, MouseClickPayload } from '@accomplish/shared';
 
 export type DesktopControlOverallStatus =
   | 'ready'
@@ -170,6 +176,11 @@ interface AccomplishAPI {
   getDebugMode(): Promise<boolean>;
   setDebugMode(enabled: boolean): Promise<void>;
   getAppSettings(): Promise<{ debugMode: boolean; onboardingComplete: boolean }>;
+  setAllowMouseControl?(enabled: boolean): Promise<void>;
+  getAllowDesktopContext?(): Promise<boolean>;
+  setAllowDesktopContext?(enabled: boolean): Promise<void>;
+  getDesktopContextBackgroundPolling?(): Promise<boolean>;
+  setDesktopContextBackgroundPolling?(enabled: boolean): Promise<void>;
 
   // API Key management
   hasApiKey(): Promise<boolean>;
@@ -220,6 +231,8 @@ interface AccomplishAPI {
   toggleAlwaysOnTop?(): Promise<boolean>;
   minimizeWindow?(): Promise<void>;
   showWindow?(): Promise<void>;
+  collapseToIconWindow?(): Promise<void>;
+  expandFromIconWindow?(): Promise<void>;
 
   // Smart trigger
   getSmartTriggerConfig?(): Promise<{
@@ -242,6 +255,24 @@ interface AccomplishAPI {
   desktopControlGetStatus?(options?: { forceRefresh?: boolean }): Promise<DesktopControlStatusPayload>;
   desktopControl?: {
     getStatus?(options?: { forceRefresh?: boolean }): Promise<DesktopControlStatusPayload>;
+  };
+
+  // Mouse control
+  mouse?: {
+    move(payload: MouseMovePayload): Promise<{ ok: true }>;
+    click(payload: MouseClickPayload): Promise<{ ok: true }>;
+  };
+
+  // Desktop context
+  desktop?: {
+    listWindows(): Promise<DesktopWindow[]>;
+    inspectWindow(windowId: number, maxDepth?: number, maxNodes?: number): Promise<AccessibleNode>;
+    capture(options: {
+      mode: 'screen' | 'window' | 'region';
+      windowId?: number;
+      rect?: { x: number; y: number; width: number; height: number };
+    }): Promise<DesktopScreenshot>;
+    getContext(options?: DesktopContextOptions): Promise<DesktopContextSnapshot>;
   };
 }
 

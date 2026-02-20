@@ -86,6 +86,8 @@ export default function SettingsDialog({ open, onOpenChange, onApiKeySaved }: Se
   const [selectedOllamaModel, setSelectedOllamaModel] = useState<string>('');
   const [savingOllama, setSavingOllama] = useState(false);
   const [keyToDelete, setKeyToDelete] = useState<string | null>(null);
+  const [allowMouseControl, setAllowMouseControl] = useState(false);
+  const [loadingMouseControl, setLoadingMouseControl] = useState(true);
 
   useEffect(() => {
     if (!open) return;
@@ -112,6 +114,8 @@ export default function SettingsDialog({ open, onOpenChange, onApiKeySaved }: Se
     setTestingOllama(false);
     setSelectedOllamaModel('');
     setSavingOllama(false);
+    setAllowMouseControl(false);
+    setLoadingMouseControl(true);
 
     const accomplish = getAccomplish();
 
@@ -176,11 +180,25 @@ export default function SettingsDialog({ open, onOpenChange, onApiKeySaved }: Se
       }
     };
 
+    const fetchMouseControlSetting = async () => {
+      try {
+        const settings = await accomplish.getAppSettings() as unknown as {
+          allowMouseControl?: boolean;
+        };
+        setAllowMouseControl(Boolean(settings.allowMouseControl));
+      } catch (err) {
+        console.error('Failed to fetch mouse control setting:', err);
+      } finally {
+        setLoadingMouseControl(false);
+      }
+    };
+
     fetchKeys();
     fetchDebugSetting();
     fetchVersion();
     fetchSelectedModel();
     fetchOllamaConfig();
+    fetchMouseControlSetting();
   }, [open]);
 
   const handleDebugToggle = async () => {
@@ -193,6 +211,19 @@ export default function SettingsDialog({ open, onOpenChange, onApiKeySaved }: Se
     } catch (err) {
       console.error('Failed to save debug setting:', err);
       setDebugMode(!newValue);
+    }
+  };
+
+  const handleMouseControlToggle = async () => {
+    const accomplish = getAccomplish();
+    const newValue = !allowMouseControl;
+    setAllowMouseControl(newValue);
+    try {
+      // Optional chaining for backwards compatibility if method is missing
+      await accomplish.setAllowMouseControl?.(newValue);
+    } catch (err) {
+      console.error('Failed to save mouse control setting:', err);
+      setAllowMouseControl(!newValue);
     }
   };
 
@@ -749,6 +780,51 @@ export default function SettingsDialog({ open, onOpenChange, onApiKeySaved }: Se
                 <StatusMessage variant="warning" className="mt-4">
                   Debug mode is enabled. Backend logs will appear in the task view
                   when running tasks.
+                </StatusMessage>
+              )}
+            </div>
+          </section>
+
+          {/* Input Control Section */}
+          <section>
+            <h2 className="mb-4 text-base font-medium text-foreground">Input control</h2>
+            <div className="rounded-lg border border-border bg-card p-5 space-y-4">
+              <div className="flex items-center justify-between gap-4">
+                <div className="flex-1">
+                  <div className="font-medium text-foreground">
+                    Allow agent to control mouse &amp; keyboard
+                  </div>
+                  <p className="mt-1.5 text-sm text-muted-foreground leading-relaxed">
+                    When enabled, Screen Agent can move your mouse, click, and perform other
+                    desktop actions on your Mac. macOS will still require you to grant
+                    Accessibility and Input Monitoring permissions, and you can turn this off
+                    at any time.
+                  </p>
+                </div>
+                <div className="ml-4">
+                  {loadingMouseControl ? (
+                    <div className="h-6 w-11 animate-pulse rounded-full bg-muted" />
+                  ) : (
+                    <button
+                      onClick={handleMouseControlToggle}
+                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors duration-200 ease-accomplish ${
+                        allowMouseControl ? 'bg-primary' : 'bg-muted'
+                      }`}
+                    >
+                      <span
+                        className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform duration-200 ease-accomplish ${
+                          allowMouseControl ? 'translate-x-6' : 'translate-x-1'
+                        }`}
+                      />
+                    </button>
+                  )}
+                </div>
+              </div>
+              {allowMouseControl && (
+                <StatusMessage variant="warning">
+                  Agent input control is enabled. Make sure you trust the tasks you run,
+                  and review macOS Privacy &amp; Security settings if anything behaves
+                  unexpectedly.
                 </StatusMessage>
               )}
             </div>

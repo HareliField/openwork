@@ -1,8 +1,18 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, Camera, Settings, X, Minimize2, Maximize2, Loader2, Bot, User, Image as ImageIcon } from 'lucide-react';
+import {
+  Send,
+  Camera,
+  Settings,
+  Minimize2,
+  Loader2,
+  Bot,
+  Image as ImageIcon,
+  History,
+  Plus,
+} from 'lucide-react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Card } from './ui/card';
@@ -13,7 +23,7 @@ import {
   type DesktopControlCapability,
   type DesktopControlStatusPayload,
 } from '../lib/accomplish';
-import type { TaskMessage } from '@accomplish/shared';
+import type { Task, TaskMessage } from '@accomplish/shared';
 import ReactMarkdown from 'react-markdown';
 import { DiagnosticsPanel } from './desktop-control/DiagnosticsPanel';
 import {
@@ -82,6 +92,43 @@ function inferDesktopControlRequirement(prompt: string): DesktopControlRequireme
   };
 }
 
+function mergeConsecutiveAssistantMessages(source: Message[]): Message[] {
+  const merged: Message[] = [];
+
+  for (const message of source) {
+    const last = merged[merged.length - 1];
+
+    if (message.role === 'assistant' && last?.role === 'assistant') {
+      const combinedAttachments = [
+        ...(last.attachments ?? []),
+        ...(message.attachments ?? []),
+      ];
+
+      if (last.content.trim() === message.content.trim()) {
+        merged[merged.length - 1] = {
+          ...last,
+          timestamp: message.timestamp,
+          attachments: combinedAttachments.length > 0 ? combinedAttachments : undefined,
+        };
+      } else {
+        merged[merged.length - 1] = {
+          ...last,
+          id: `${last.id}__merged_with__${message.id}`,
+          content: `${last.content}\n\n${message.content}`,
+          timestamp: message.timestamp,
+          attachments: combinedAttachments.length > 0 ? combinedAttachments : undefined,
+        };
+      }
+
+      continue;
+    }
+
+    merged.push(message);
+  }
+
+  return merged;
+}
+
 export function FloatingChat({ onOpenSettings }: FloatingChatProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -89,6 +136,9 @@ export function FloatingChat({ onOpenSettings }: FloatingChatProps) {
   const [isMinimized, setIsMinimized] = useState(false);
   const [currentTaskId, setCurrentTaskId] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [taskHistory, setTaskHistory] = useState<Task[]>([]);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [showHistoryPanel, setShowHistoryPanel] = useState(false);
   const [desktopControlStatus, setDesktopControlStatus] = useState<DesktopControlStatusPayload | null>(null);
   const [desktopControlError, setDesktopControlError] = useState<string | null>(null);
   const [isCheckingDesktopControl, setIsCheckingDesktopControl] = useState(false);
@@ -100,7 +150,18 @@ export function FloatingChat({ onOpenSettings }: FloatingChatProps) {
   const isLoadingRef = useRef(isLoading);
   const currentTaskIdRef = useRef<string | null>(currentTaskId);
   const sessionIdRef = useRef<string | null>(sessionId);
+  const selectedTaskIdRef = useRef<string | null>(selectedTaskId);
   const accomplish = getAccomplish();
+  const displayMessages = useMemo(() => mergeConsecutiveAssistantMessages(messages), [messages]);
+
+  const refreshTaskHistory = useCallback(async () => {
+    try {
+      const tasks = await accomplish.listTasks();
+      setTaskHistory(tasks);
+    } catch (error) {
+      console.error('[FloatingChat] Failed to refresh task history:', error);
+    }
+  }, [accomplish]);
 
   const addAssistantMessage = useCallback((content: string) => {
     setMessages((prev) => [
@@ -194,13 +255,17 @@ export function FloatingChat({ onOpenSettings }: FloatingChatProps) {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
 
+  useEffect(() => {
+    selectedTaskIdRef.current = selectedTaskId;
+  }, [selectedTaskId]);
+
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
     const target = messagesEndRef.current;
     if (target && typeof target.scrollIntoView === 'function') {
       target.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages]);
+  }, [displayMessages, isLoading]);
 
   // Initial desktop-control readiness check on mount
   useEffect(() => {
@@ -209,35 +274,47 @@ export function FloatingChat({ onOpenSettings }: FloatingChatProps) {
 
   // Load conversation history on mount
   useEffect(() => {
+    const hydrateFromTask = (task: Task) => {
+      if (!task.messages || task.messages.length === 0) return;
+
+      const loadedMessages: Message[] = task.messages.map((msg) => ({
+        id: msg.id,
+        role: msg.type as 'user' | 'assistant' | 'tool',
+        content: msg.content,
+        timestamp: new Date(msg.timestamp),
+        attachments: msg.attachments
+          ?.filter((a) => a.type === 'screenshot')
+          .map((a) => ({
+            type: 'screenshot' as const,
+            data: a.data,
+          })),
+      }));
+
+      setMessages(loadedMessages);
+      setCurrentTaskId(task.id);
+      setSelectedTaskId(task.id);
+
+      const session = task.sessionId || task.result?.sessionId || null;
+      if (session) {
+        sessionIdRef.current = session;
+        setSessionId(session);
+      }
+    };
+
     const loadHistory = async () => {
       try {
         const tasks = await accomplish.listTasks();
+        setTaskHistory(tasks);
+
         if (tasks.length > 0) {
-          // Load the most recent conversation
           const latestTask = tasks[tasks.length - 1];
-          if (latestTask.messages && latestTask.messages.length > 0) {
-            const loadedMessages: Message[] = latestTask.messages.map((msg) => ({
-              id: msg.id,
-              role: msg.type as 'user' | 'assistant' | 'tool',
-              content: msg.content,
-              timestamp: new Date(msg.timestamp),
-              attachments: msg.attachments?.filter(a => a.type === 'screenshot').map(a => ({
-                type: 'screenshot' as const,
-                data: a.data,
-              })),
-            }));
-            setMessages(loadedMessages);
-            // Store the sessionId if available (for potential future resumption)
-            if (latestTask.sessionId) {
-              sessionIdRef.current = latestTask.sessionId;
-            }
-          }
+          hydrateFromTask(latestTask);
         }
       } catch (error) {
         console.error('[FloatingChat] Failed to load conversation history:', error);
-        // Continue silently - this is not a critical failure
       }
     };
+
     void loadHistory();
   }, [accomplish]);
 
@@ -291,9 +368,11 @@ export function FloatingChat({ onOpenSettings }: FloatingChatProps) {
         if (activeSessionId) {
           await accomplish.resumeSession(activeSessionId, autoPrompt);
         } else {
+          const nextTaskId = `trigger_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+          currentTaskIdRef.current = nextTaskId;
           const task = await accomplish.startTask({
             prompt: autoPrompt,
-            taskId: `trigger_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            taskId: nextTaskId,
           });
           currentTaskIdRef.current = task.id;
           setCurrentTaskId(task.id);
@@ -331,6 +410,11 @@ export function FloatingChat({ onOpenSettings }: FloatingChatProps) {
   // Subscribe to task events
   useEffect(() => {
     const unsubscribeTask = accomplish.onTaskUpdate((event) => {
+      const activeTaskId = currentTaskIdRef.current ?? selectedTaskIdRef.current;
+      if (!activeTaskId || event.taskId !== activeTaskId) {
+        return;
+      }
+
       if (event.type === 'message' && event.message) {
         const msg = event.message as TaskMessage;
         
@@ -369,6 +453,7 @@ export function FloatingChat({ onOpenSettings }: FloatingChatProps) {
         if (isCancellingRef.current) return;
         isLoadingRef.current = false;
         setIsLoading(false);
+        void refreshTaskHistory();
         if (event.result?.sessionId) {
           sessionIdRef.current = event.result.sessionId;
           setSessionId(event.result.sessionId);
@@ -380,6 +465,7 @@ export function FloatingChat({ onOpenSettings }: FloatingChatProps) {
         if (isCancellingRef.current) return;
         isLoadingRef.current = false;
         setIsLoading(false);
+        void refreshTaskHistory();
         setMessages(prev => [...prev, {
           id: `error-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
           role: 'assistant',
@@ -391,6 +477,11 @@ export function FloatingChat({ onOpenSettings }: FloatingChatProps) {
 
     // Handle batched updates
     const unsubscribeBatch = accomplish.onTaskUpdateBatch?.((event) => {
+      const activeTaskId = currentTaskIdRef.current ?? selectedTaskIdRef.current;
+      if (!activeTaskId || event.taskId !== activeTaskId) {
+        return;
+      }
+
       if (event.messages?.length) {
         const newMessages: Message[] = [];
         
@@ -419,11 +510,12 @@ export function FloatingChat({ onOpenSettings }: FloatingChatProps) {
       unsubscribeTask();
       unsubscribeBatch?.();
     };
-  }, [accomplish]);
+  }, [accomplish, refreshTaskHistory]);
 
   // Send message
   const sendMessage = useCallback(async () => {
     if (!input.trim() || isLoading) return;
+    setShowHistoryPanel(false);
 
     const prompt = input.trim();
     const userMessage: Message = {
@@ -474,14 +566,21 @@ export function FloatingChat({ onOpenSettings }: FloatingChatProps) {
       }
 
       // Start a new task (don't auto-resume old sessions)
+      const nextTaskId = `task_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      currentTaskIdRef.current = nextTaskId;
       const task = await accomplish.startTask({
         prompt,
-        taskId: `task_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        taskId: nextTaskId,
       });
+      currentTaskIdRef.current = task.id;
       setCurrentTaskId(task.id);
       // Clear sessionId to avoid auto-resuming in next message
       setSessionId(null);
+      setSelectedTaskId(task.id);
+
+      void refreshTaskHistory();
     } catch (error) {
+      currentTaskIdRef.current = null;
       setIsLoading(false);
       setMessages(prev => [...prev, {
         id: `error-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
@@ -493,16 +592,17 @@ export function FloatingChat({ onOpenSettings }: FloatingChatProps) {
   }, [
     input,
     isLoading,
-    sessionId,
     currentTaskId,
     accomplish,
     onOpenSettings,
     ensureDesktopControlReady,
+    refreshTaskHistory,
   ]);
 
   // Quick action: capture screen
   const captureScreen = useCallback(async () => {
     if (isLoading) return;
+    setShowHistoryPanel(false);
 
     const desktopControlReady = await ensureDesktopControlReady(SCREEN_CAPTURE_REQUIREMENT);
     if (!desktopControlReady) {
@@ -545,14 +645,21 @@ export function FloatingChat({ onOpenSettings }: FloatingChatProps) {
       }
 
       // Start a new task (don't auto-resume old sessions)
+      const nextTaskId = `task_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      currentTaskIdRef.current = nextTaskId;
       const task = await accomplish.startTask({
         prompt,
-        taskId: `task_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        taskId: nextTaskId,
       });
+      currentTaskIdRef.current = task.id;
       setCurrentTaskId(task.id);
       // Clear sessionId to avoid auto-resuming in next message
       setSessionId(null);
+      setSelectedTaskId(task.id);
+
+      void refreshTaskHistory();
     } catch (error) {
+      currentTaskIdRef.current = null;
       setIsLoading(false);
       setMessages(prev => [...prev, {
         id: `error-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
@@ -561,7 +668,7 @@ export function FloatingChat({ onOpenSettings }: FloatingChatProps) {
         timestamp: new Date(),
       }]);
     }
-  }, [isLoading, accomplish, currentTaskId, onOpenSettings, ensureDesktopControlReady]);
+  }, [isLoading, accomplish, currentTaskId, onOpenSettings, ensureDesktopControlReady, refreshTaskHistory]);
 
   const recheckDesktopControl = useCallback(() => {
     void checkDesktopControl({
@@ -575,6 +682,79 @@ export function FloatingChat({ onOpenSettings }: FloatingChatProps) {
     (desktopControlStatus?.status !== 'ready' ||
       Boolean(desktopControlError) ||
       isCheckingDesktopControl);
+
+  // Select a previous chat by task ID
+  const handleSelectTask = useCallback(
+    async (taskId: string) => {
+      setSelectedTaskId(taskId);
+      selectedTaskIdRef.current = taskId;
+      isLoadingRef.current = false;
+      setIsLoading(false);
+      setShowHistoryPanel(false);
+
+      try {
+        const task = await accomplish.getTask(taskId);
+        if (!task) return;
+
+        if (task.messages && task.messages.length > 0) {
+          const loadedMessages: Message[] = task.messages.map((msg) => ({
+            id: msg.id,
+            role: msg.type as 'user' | 'assistant' | 'tool',
+            content: msg.content,
+            timestamp: new Date(msg.timestamp),
+            attachments: msg.attachments
+              ?.filter((a) => a.type === 'screenshot')
+              .map((a) => ({
+                type: 'screenshot' as const,
+                data: a.data,
+              })),
+          }));
+
+          setMessages(loadedMessages);
+        } else {
+          setMessages([]);
+        }
+
+        setCurrentTaskId(task.id);
+        currentTaskIdRef.current = task.id;
+
+        const session = task.sessionId || task.result?.sessionId || null;
+        if (session) {
+          sessionIdRef.current = session;
+          setSessionId(session);
+        } else {
+          sessionIdRef.current = null;
+          setSessionId(null);
+        }
+      } catch (error) {
+        console.error('[FloatingChat] Failed to load task for history selection:', error);
+      }
+    },
+    [accomplish]
+  );
+
+  // Start a brand new chat without any previous context
+  const handleNewChat = useCallback(async () => {
+    if (currentTaskIdRef.current) {
+      try {
+        await accomplish.cancelTask(currentTaskIdRef.current);
+      } catch {
+        // Ignore if task already completed/cancelled
+      }
+    }
+
+    setMessages([]);
+    setInput('');
+    isLoadingRef.current = false;
+    setIsLoading(false);
+    setCurrentTaskId(null);
+    currentTaskIdRef.current = null;
+    setSessionId(null);
+    sessionIdRef.current = null;
+    setSelectedTaskId(null);
+    selectedTaskIdRef.current = null;
+    setShowHistoryPanel(false);
+  }, [accomplish]);
 
   const headerStatus = isLoading
     ? 'Thinking...'
@@ -590,6 +770,26 @@ export function FloatingChat({ onOpenSettings }: FloatingChatProps) {
     }
   };
 
+  const collapseToIcon = useCallback(async () => {
+    try {
+      await accomplish.collapseToIconWindow?.();
+    } catch (error) {
+      console.warn('[FloatingChat] Failed to collapse window to icon:', error);
+    } finally {
+      setIsMinimized(true);
+    }
+  }, [accomplish]);
+
+  const expandFromIcon = useCallback(async () => {
+    try {
+      await accomplish.expandFromIconWindow?.();
+    } catch (error) {
+      console.warn('[FloatingChat] Failed to expand window from icon:', error);
+    } finally {
+      setIsMinimized(false);
+    }
+  }, [accomplish]);
+
   // Minimized view
   if (isMinimized) {
     return (
@@ -599,10 +799,26 @@ export function FloatingChat({ onOpenSettings }: FloatingChatProps) {
         className="fixed bottom-4 right-4 z-50"
       >
         <Button
-          onClick={() => setIsMinimized(false)}
-          className="h-14 w-14 rounded-full shadow-lg bg-primary hover:bg-primary/90"
+          variant="ghost"
+          size="icon"
+          onClick={() => void expandFromIcon()}
+          className="h-12 w-12 rounded-none bg-transparent p-0 hover:bg-transparent"
+          title="Open Screen Agent"
+          aria-label="Open Screen Agent"
         >
-          <Bot className="h-6 w-6" />
+          <svg
+            viewBox="0 0 64 64"
+            className="h-11 w-11 drop-shadow-sm"
+            aria-hidden="true"
+          >
+            <path
+              d="M12 10C7.6 10 4 13.6 4 18v20c0 4.4 3.6 8 8 8h26l14 12-4-12h4c4.4 0 8-3.6 8-8V18c0-4.4-3.6-8-8-8H12z"
+              fill="#2f7d32"
+            />
+            <circle cx="22" cy="28" r="4" fill="#ffffff" />
+            <circle cx="32" cy="28" r="4" fill="#ffffff" />
+            <circle cx="42" cy="28" r="4" fill="#ffffff" />
+          </svg>
         </Button>
       </motion.div>
     );
@@ -612,7 +828,10 @@ export function FloatingChat({ onOpenSettings }: FloatingChatProps) {
     <motion.div
       initial={{ y: 20, opacity: 0 }}
       animate={{ y: 0, opacity: 1 }}
-      className="fixed bottom-4 right-4 z-50 w-[420px]"
+      className={cn(
+        'fixed bottom-4 right-4 z-50 max-w-[calc(100vw-2rem)]',
+        showHistoryPanel ? 'w-[580px]' : 'w-[420px]'
+      )}
     >
       <Card className="flex flex-col h-[600px] shadow-2xl border-border/50 overflow-hidden bg-background/95 backdrop-blur-xl">
         {/* Header */}
@@ -633,6 +852,24 @@ export function FloatingChat({ onOpenSettings }: FloatingChatProps) {
               variant="ghost"
               size="icon"
               className="h-8 w-8"
+              onClick={() => setShowHistoryPanel((v) => !v)}
+              title="Previous chats"
+            >
+              <History className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => void handleNewChat()}
+              title="New chat"
+            >
+              <Plus className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
               onClick={onOpenSettings}
               title="Settings"
             >
@@ -642,103 +879,169 @@ export function FloatingChat({ onOpenSettings }: FloatingChatProps) {
               variant="ghost"
               size="icon"
               className="h-8 w-8"
-              onClick={() => setIsMinimized(true)}
-              title="Minimize"
+              onClick={() => void collapseToIcon()}
+              title="Close to chat bubble"
+              aria-label="Close to chat bubble"
             >
               <Minimize2 className="h-4 w-4" />
             </Button>
           </div>
         </div>
 
-        <AnimatePresence initial={false}>
-          {shouldShowDiagnostics && (
-            <motion.div
-              initial={{ opacity: 0, y: -6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -6 }}
-              className="border-b border-border/70 p-3"
-            >
-              <DiagnosticsPanel
-                status={desktopControlStatus}
-                isChecking={isCheckingDesktopControl}
-                errorMessage={desktopControlError}
-                onRecheck={recheckDesktopControl}
-              />
-            </motion.div>
-          )}
-        </AnimatePresence>
+        <div className="flex flex-1 min-h-0">
+          <AnimatePresence initial={false}>
+            {showHistoryPanel && (
+              <motion.div
+                initial={{ opacity: 0, x: -8 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -8 }}
+                className="w-44 border-r border-border bg-muted/20 p-3 flex flex-col"
+              >
+                <Button
+                  size="sm"
+                  className="w-full justify-start gap-2 mb-3"
+                  onClick={() => void handleNewChat()}
+                >
+                  <Plus className="h-4 w-4" />
+                  New chat
+                </Button>
 
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          {messages.length === 0 ? (
-            <div className="h-full flex flex-col items-center justify-center text-center p-6">
-              <div className="h-16 w-16 rounded-full bg-primary/10 flex items-center justify-center mb-4">
-                <Bot className="h-8 w-8 text-primary" />
-              </div>
-              <h3 className="text-lg font-medium text-foreground mb-2">
-                Hi! I can see your screen.
-              </h3>
-              <p className="text-sm text-muted-foreground mb-6">
-                Ask me anything about what's on your screen, or let me help you navigate any app.
-              </p>
-              <div className="flex flex-wrap gap-2 justify-center">
+                <p className="text-xs font-medium text-foreground mb-2">Past chats</p>
+                <div className="flex-1 overflow-y-auto space-y-1">
+                  {taskHistory.length === 0 ? (
+                    <p className="text-[11px] text-muted-foreground">
+                      No previous chats yet.
+                    </p>
+                  ) : (
+                    taskHistory
+                      .slice()
+                      .reverse()
+                      .map((task) => {
+                        const label = task.summary || task.prompt || 'Untitled chat';
+                        const created = task.createdAt
+                          ? new Date(task.createdAt).toLocaleTimeString([], {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })
+                          : '';
+
+                        return (
+                          <button
+                            key={task.id}
+                            type="button"
+                            onClick={() => void handleSelectTask(task.id)}
+                            className={cn(
+                              'w-full text-left px-2 py-1.5 rounded-md text-[11px] flex items-center justify-between gap-2 hover:bg-muted',
+                              selectedTaskId === task.id && 'bg-primary/10 text-primary'
+                            )}
+                          >
+                            <span className="truncate flex-1">{label}</span>
+                            {created && (
+                              <span className="shrink-0 text-[10px] text-muted-foreground">
+                                {created}
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })
+                  )}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          <div className="flex flex-1 flex-col min-w-0">
+            <AnimatePresence initial={false}>
+              {shouldShowDiagnostics && (
+                <motion.div
+                  initial={{ opacity: 0, y: -6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -6 }}
+                  className="border-b border-border/70 p-3"
+                >
+                  <DiagnosticsPanel
+                    status={desktopControlStatus}
+                    isChecking={isCheckingDesktopControl}
+                    errorMessage={desktopControlError}
+                    onRecheck={recheckDesktopControl}
+                  />
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* Messages */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+              {displayMessages.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-center p-6">
+                  <div className="h-16 w-16 rounded-full bg-primary/10 flex items-center justify-center mb-4">
+                    <Bot className="h-8 w-8 text-primary" />
+                  </div>
+                  <h3 className="text-lg font-medium text-foreground mb-2">
+                    Hi! I can see your screen.
+                  </h3>
+                  <p className="text-sm text-muted-foreground mb-6">
+                    Ask me anything about what's on your screen, or let me help you navigate any app.
+                  </p>
+                  <div className="flex flex-wrap gap-2 justify-center">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={captureScreen}
+                      className="gap-1.5"
+                    >
+                      <Camera className="h-3.5 w-3.5" />
+                      What's on my screen?
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {displayMessages.map((message) => (
+                    <MessageBubble key={message.id} message={message} />
+                  ))}
+                  {isLoading && (
+                    <div className="flex items-center gap-2 text-muted-foreground">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      <span className="text-sm">Thinking...</span>
+                    </div>
+                  )}
+                </>
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+
+            {/* Input */}
+            <div className="p-4 border-t border-border bg-muted/20">
+              <div className="flex gap-2">
                 <Button
                   variant="outline"
-                  size="sm"
+                  size="icon"
+                  className="shrink-0"
                   onClick={captureScreen}
-                  className="gap-1.5"
+                  disabled={isLoading}
+                  title="Capture screen"
                 >
-                  <Camera className="h-3.5 w-3.5" />
-                  What's on my screen?
+                  <Camera className="h-4 w-4" />
+                </Button>
+                <Input
+                  ref={inputRef}
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder="Ask me anything..."
+                  disabled={isLoading}
+                  className="flex-1"
+                />
+                <Button
+                  onClick={sendMessage}
+                  disabled={!input.trim() || isLoading}
+                  size="icon"
+                  className="shrink-0"
+                >
+                  <Send className="h-4 w-4" />
                 </Button>
               </div>
             </div>
-          ) : (
-            <>
-              {messages.map((message) => (
-                <MessageBubble key={message.id} message={message} />
-              ))}
-              {isLoading && (
-                <div className="flex items-center gap-2 text-muted-foreground">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  <span className="text-sm">Thinking...</span>
-                </div>
-              )}
-            </>
-          )}
-          <div ref={messagesEndRef} />
-        </div>
-
-        {/* Input */}
-        <div className="p-4 border-t border-border bg-muted/20">
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              size="icon"
-              className="shrink-0"
-              onClick={captureScreen}
-              disabled={isLoading}
-              title="Capture screen"
-            >
-              <Camera className="h-4 w-4" />
-            </Button>
-            <Input
-              ref={inputRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Ask me anything..."
-              disabled={isLoading}
-              className="flex-1"
-            />
-            <Button
-              onClick={sendMessage}
-              disabled={!input.trim() || isLoading}
-              size="icon"
-              className="shrink-0"
-            >
-              <Send className="h-4 w-4" />
-            </Button>
           </div>
         </div>
       </Card>

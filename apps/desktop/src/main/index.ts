@@ -8,6 +8,11 @@ import { disposeTaskManager } from './opencode/task-manager';
 import { checkAndCleanupFreshInstall } from './store/freshInstallCleanup';
 import { initializeSmartTrigger, disposeSmartTrigger } from './smart-trigger';
 import { storeApiKey, getApiKey } from './store/secureStorage';
+import { getDesktopContextService } from './services/desktop-context-service';
+import {
+  initializeDesktopContextPolling,
+  getDesktopContextPollingService,
+} from './services/desktop-context-polling';
 
 process.on('uncaughtException', (error) => {
   console.error('[Main] Uncaught exception:', error);
@@ -86,6 +91,28 @@ export const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist');
 export const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL;
 
 let mainWindow: BrowserWindow | null = null;
+let expandedWindowBounds: { x: number; y: number; width: number; height: number } | null = null;
+let isCollapsedToIcon = false;
+
+const DEFAULT_WINDOW_MIN_WIDTH = 380;
+const DEFAULT_WINDOW_MIN_HEIGHT = 500;
+const DEFAULT_WINDOW_MAX_WIDTH = 600;
+const DEFAULT_WINDOW_MAX_HEIGHT = 900;
+const ICON_WINDOW_SIZE = 56;
+const ICON_WINDOW_MARGIN = 16;
+
+function getIconWindowBounds(targetWindow: BrowserWindow): { x: number; y: number; width: number; height: number } {
+  const display = screen.getDisplayMatching(targetWindow.getBounds());
+  const { x, y, width, height } = display.workArea;
+
+  return {
+    width: ICON_WINDOW_SIZE,
+    height: ICON_WINDOW_SIZE,
+    x: x + width - ICON_WINDOW_SIZE - ICON_WINDOW_MARGIN,
+    y: y + height - ICON_WINDOW_SIZE - ICON_WINDOW_MARGIN,
+  };
+}
+
 function getActiveMainWindow(): BrowserWindow | null {
   if (
     !mainWindow ||
@@ -149,10 +176,10 @@ function createWindow() {
     height: windowHeight,
     x,
     y,
-    minWidth: 380,
-    minHeight: 500,
-    maxWidth: 600,
-    maxHeight: 900,
+    minWidth: DEFAULT_WINDOW_MIN_WIDTH,
+    minHeight: DEFAULT_WINDOW_MIN_HEIGHT,
+    maxWidth: DEFAULT_WINDOW_MAX_WIDTH,
+    maxHeight: DEFAULT_WINDOW_MAX_HEIGHT,
     title: 'Screen Agent',
     icon: icon.isEmpty() ? undefined : icon,
     // Floating window style
@@ -179,6 +206,8 @@ function createWindow() {
     if (mainWindow === createdWindow) {
       mainWindow = null;
     }
+    expandedWindowBounds = null;
+    isCollapsedToIcon = false;
   });
 
   // Open external links in browser
@@ -296,6 +325,9 @@ if (shouldUseSingleInstanceLock && !gotTheLock) {
       initializeSmartTrigger(activeWindow);
     }
 
+    // Initialize desktop context polling if enabled
+    initializeDesktopContextPolling();
+
     app.on('activate', () => {
       withActiveMainWindow((active) => {
         active.show();
@@ -315,11 +347,13 @@ app.on('window-all-closed', () => {
   }
 });
 
-// Dispose TaskManager and SmartTrigger before quitting
+// Dispose TaskManager, SmartTrigger, DesktopContextService, and polling before quitting
 app.on('before-quit', () => {
   console.log('[Main] App before-quit event fired');
   disposeTaskManager();
   disposeSmartTrigger();
+  getDesktopContextService().shutdown();
+  getDesktopContextPollingService().stop();
 });
 
 // Handle custom protocol
@@ -370,4 +404,40 @@ ipcMain.handle('window:show', () => {
     activeWindow.show();
     activeWindow.focus();
   }
+});
+
+ipcMain.handle('window:collapse-to-icon', () => {
+  const activeWindow = getActiveMainWindow();
+  if (!activeWindow) return;
+
+  if (!isCollapsedToIcon) {
+    expandedWindowBounds = activeWindow.getBounds();
+  }
+
+  activeWindow.setMinimumSize(1, 1);
+  activeWindow.setMaximumSize(9999, 9999);
+  activeWindow.setResizable(false);
+  activeWindow.setVibrancy(null);
+  activeWindow.setHasShadow(false);
+  activeWindow.setBounds(getIconWindowBounds(activeWindow), true);
+  isCollapsedToIcon = true;
+});
+
+ipcMain.handle('window:expand-from-icon', () => {
+  const activeWindow = getActiveMainWindow();
+  if (!activeWindow) return;
+
+  activeWindow.setResizable(true);
+  activeWindow.setMinimumSize(DEFAULT_WINDOW_MIN_WIDTH, DEFAULT_WINDOW_MIN_HEIGHT);
+  activeWindow.setMaximumSize(DEFAULT_WINDOW_MAX_WIDTH, DEFAULT_WINDOW_MAX_HEIGHT);
+  activeWindow.setVibrancy('under-window');
+  activeWindow.setHasShadow(true);
+
+  if (expandedWindowBounds) {
+    activeWindow.setBounds(expandedWindowBounds, true);
+  }
+
+  activeWindow.show();
+  activeWindow.focus();
+  isCollapsedToIcon = false;
 });

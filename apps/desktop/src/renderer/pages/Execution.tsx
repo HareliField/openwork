@@ -95,6 +95,41 @@ export default function ExecutionPage() {
     setupDownloadStep,
   } = useTaskStore();
 
+  // Filter and merge messages so that consecutive assistant messages
+  // are displayed as a single combined message bubble.
+  const filteredMessages = useMemo(
+    () =>
+      currentTask?.messages
+        .filter((m) => !(m.type === 'tool' && m.toolName?.toLowerCase() === 'bash')) ?? [],
+    [currentTask?.messages]
+  );
+
+  const displayMessages = useMemo(() => {
+    const merged: TaskMessage[] = [];
+
+    for (const msg of filteredMessages) {
+      const last = merged[merged.length - 1];
+
+      if (msg.type === 'assistant' && last?.type === 'assistant') {
+        // Merge consecutive assistant messages into a single message
+        merged[merged.length - 1] = {
+          ...last,
+          id: `${last.id}__merged_with__${msg.id}`,
+          content: `${last.content}\n\n${msg.content}`,
+          timestamp: msg.timestamp,
+          attachments: [
+            ...(last.attachments ?? []),
+            ...(msg.attachments ?? []),
+          ],
+        };
+      } else {
+        merged.push({ ...msg });
+      }
+    }
+
+    return merged;
+  }, [filteredMessages]);
+
   // Debounced scroll function
   const scrollToBottom = useMemo(
     () =>
@@ -448,9 +483,7 @@ export default function ExecutionPage() {
       {currentTask.status === 'queued' && currentTask.messages.length > 0 && (
         <div className="flex-1 overflow-y-auto px-6 py-6">
           <div className="max-w-4xl mx-auto space-y-4">
-            {currentTask.messages
-              .filter((m) => !(m.type === 'tool' && m.toolName?.toLowerCase() === 'bash'))
-              .map((message) => (
+            {displayMessages.map((message) => (
               <MessageBubble key={message.id} message={message} />
             ))}
 
@@ -483,16 +516,14 @@ export default function ExecutionPage() {
       {currentTask.status !== 'queued' && (
         <div className="flex-1 overflow-y-auto px-6 py-6">
           <div className="max-w-4xl mx-auto space-y-4">
-            {currentTask.messages
-              .filter((m) => !(m.type === 'tool' && m.toolName?.toLowerCase() === 'bash'))
-              .map((message, index, filteredMessages) => {
-              const isLastMessage = index === filteredMessages.length - 1;
+            {displayMessages.map((message, index) => {
+              const isLastMessage = index === displayMessages.length - 1;
               const isLastAssistantMessage =
                 message.type === 'assistant' && isLastMessage;
               // Find the last assistant message index for the continue button
               let lastAssistantIndex = -1;
-              for (let i = filteredMessages.length - 1; i >= 0; i--) {
-                if (filteredMessages[i].type === 'assistant') {
+              for (let i = displayMessages.length - 1; i >= 0; i--) {
+                if (displayMessages[i].type === 'assistant') {
                   lastAssistantIndex = i;
                   break;
                 }

@@ -24,6 +24,18 @@ export function getSkillsPath(): string {
 }
 
 /**
+ * Resolve the desktop-context helper path for MCP servers.
+ * In dev, use the Swift source file; in packaged app, use the compiled binary in resources.
+ */
+function getDesktopContextHelperPath(): string {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'desktop-context-helper');
+  }
+
+  return path.join(app.getAppPath(), 'native', 'desktop-context-helper.swift');
+}
+
+/**
  * System prompt for the Screen Agent.
  * The agent can see the user's screen and help guide them through tasks.
  */
@@ -44,6 +56,10 @@ Never assume Node.js is installed system-wide. Always use the bundled version.
 You can:
 - **See the user's screen** via the capture_screen tool
 - **Get active window info** via get_screen_info tool
+- **List windows across foreground/background apps** via list_windows
+- **Capture hidden/background windows directly** via capture_window
+- **Collect hybrid background context snapshots** via get_background_context
+- **Inspect accessibility trees for specific windows** via inspect_window
 - **Run live screen sessions** via start_live_view, get_live_frame, stop_live_view tools
 - **Perform mouse actions** via click, move_mouse, double_click tools
 - **Perform keyboard actions** via type_text, press_key tools
@@ -89,8 +105,11 @@ When the user asks for help:
 
 1. Decide if the request needs current screen context.
 2. If the request is about what's visible now, **take a screenshot** using capture_screen.
-3. If the request is general chat, coding, or planning, answer directly without screen tools.
-4. When using a screenshot, analyze UI elements and give clear guidance:
+3. If the request is about hidden/background windows, use list_windows and then get_background_context.
+4. If the user asks what is inside a specific background app/window, call capture_window for that window ID and describe the returned image.
+5. If a background request is ambiguous, run list_windows, pick the most likely 1-3 background windows, call capture_window on each, then summarize what each shows.
+6. If the request is general chat, coding, or planning, answer directly without screen tools.
+7. When using a screenshot, analyze UI elements and give clear guidance:
    - "Click the blue 'Save' button in the top-right corner"
    - "Look for the gear icon in the menu bar, about 3 inches from the right edge"
    - "The setting you need is in System Settings > Privacy & Security > Accessibility"
@@ -104,7 +123,7 @@ If the user asks you to perform an action:
 
 <live-view-workflow>
 Use live view when the UI is changing quickly or when you need repeated visual checks.
-1. Start a session with start_live_view
+1. Start a session with start_live_view (for real-time tasks, set duration_seconds to 120-300 and sample_fps to at least 1)
 2. Poll for updates with get_live_frame after each meaningful step (or while waiting for UI changes)
 3. Stop the session with stop_live_view when done, when switching tasks, or when the user pauses
 </live-view-workflow>
@@ -160,6 +179,9 @@ If a required tool fails, is blocked, or is unavailable:
 - If you can see the problem, state the solution immediately.
 - Don't comment on personal content visible on screen.
 - If something is unclear, ask one specific question.
+- Respond with one consolidated assistant message per user turn.
+- Think and run tools silently; avoid multiple short progress/thinking chat messages.
+- Prefer clean markdown with short section headers and bullet points for summaries.
 </behavior>
 `;
 
@@ -260,10 +282,13 @@ export async function generateOpenCodeConfig(): Promise<string> {
   const shellPath = process.platform === 'win32'
     ? (process.env.COMSPEC || 'cmd.exe')
     : '/bin/sh';
+  const desktopContextHelperPath = getDesktopContextHelperPath();
   const mcpEnvironment: Record<string, string> = {
     PATH: mcpPath,
     // Ensure SHELL is set for any subprocess that needs it.
     SHELL: shellPath,
+    DESKTOP_CONTEXT_HELPER_PATH: desktopContextHelperPath,
+    DESKTOP_CONTEXT_SWIFT_COMMAND: 'swift',
   };
   
   console.log('[OpenCode Config] Using npx path:', npxPath);

@@ -3,7 +3,7 @@
  * Live Screen Stream MCP Server
  *
  * Provides sampled live-view sessions that capture screenshots at a fixed rate.
- * Sessions default to 1 FPS and expire deterministically after at most 30 seconds.
+ * Sessions default to 1 FPS and expire deterministically after at most 5 minutes.
  */
 
 import { exec } from 'child_process';
@@ -24,8 +24,10 @@ import {
 const execAsync = promisify(exec);
 
 const DEFAULT_SAMPLE_FPS = 1;
-const DEFAULT_SESSION_LIFETIME_SECONDS = 30;
-const MAX_SESSION_LIFETIME_SECONDS = 30;
+const DEFAULT_SESSION_LIFETIME_SECONDS = 120;
+const MAX_SESSION_LIFETIME_SECONDS = 300;
+const CAPTURE_MAX_RETRIES = 3;
+const CAPTURE_RETRY_DELAY_MS = 150;
 const TEMP_DIR = path.join(os.tmpdir(), 'live-screen-stream-captures');
 const SCREENCAPTURE_BIN = existsSync('/usr/sbin/screencapture')
   ? '/usr/sbin/screencapture'
@@ -96,6 +98,10 @@ function errorResult(code: ToolErrorCode, message: string): CallToolResult {
   };
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function cleanupExpiredSessions(now = Date.now()): void {
   for (const [sessionId, session] of activeSessions.entries()) {
     if (now >= session.expiresAt) {
@@ -148,47 +154,86 @@ function resolveSession(sessionId: string): { session: LiveSession | null; error
   };
 }
 
-async function captureScreen(options: { includeCursor: boolean; activeWindowOnly: boolean }): Promise<string> {
-  const timestamp = Date.now();
-  const filePath = path.join(TEMP_DIR, `live_frame_${timestamp}_${randomUUID()}.png`);
-
-  let cmd = `${SCREENCAPTURE_BIN} -x`;
-
-  if (options.includeCursor) {
-    cmd += ' -C';
-  }
-
-  if (options.activeWindowOnly) {
-    try {
-      const { stdout } = await execAsync(`
-        osascript -e 'tell application "System Events"
-          tell (first application process whose frontmost is true)
-            tell (first window)
-              return {position, size}
-            end tell
+async function getActiveWindowRegionArg(): Promise<string | null> {
+  try {
+    const { stdout } = await execAsync(`
+      osascript -e 'tell application "System Events"
+        tell (first application process whose frontmost is true)
+          tell (first window)
+            return {position, size}
           end tell
-        end tell'
-      `);
+        end tell
+      end tell'
+    `);
 
-      const boundsMatch = stdout.match(/(\d+),\s*(\d+).*?(\d+),\s*(\d+)/);
-      if (boundsMatch) {
-        const [, x, y, width, height] = boundsMatch;
-        cmd += ` -R${x},${y},${width},${height}`;
-      }
-    } catch (error) {
-      console.error('Could not resolve active window bounds, falling back to full screen capture:', error);
+    const boundsMatch = stdout.match(/(\d+),\s*(\d+).*?(\d+),\s*(\d+)/);
+    if (!boundsMatch) {
+      console.error(
+        'Could not parse active window bounds, falling back to full screen capture.'
+      );
+      return null;
+    }
+
+    const [, x, y, width, height] = boundsMatch;
+    const numericWidth = Number(width);
+    const numericHeight = Number(height);
+    if (
+      !Number.isFinite(numericWidth) ||
+      !Number.isFinite(numericHeight) ||
+      numericWidth <= 0 ||
+      numericHeight <= 0
+    ) {
+      console.error('Active window bounds were invalid, falling back to full screen capture.');
+      return null;
+    }
+
+    return `-R${x},${y},${width},${height}`;
+  } catch (error) {
+    console.error('Could not resolve active window bounds, falling back to full screen capture:', error);
+    return null;
+  }
+}
+
+async function captureScreen(options: { includeCursor: boolean; activeWindowOnly: boolean }): Promise<string> {
+  let regionArg = '';
+  if (options.activeWindowOnly) {
+    const activeWindowRegion = await getActiveWindowRegionArg();
+    if (activeWindowRegion) {
+      regionArg = ` ${activeWindowRegion}`;
     }
   }
 
-  cmd += ` "${filePath}"`;
+  for (let attempt = 1; attempt <= CAPTURE_MAX_RETRIES; attempt += 1) {
+    const timestamp = Date.now();
+    const filePath = path.join(TEMP_DIR, `live_frame_${timestamp}_${attempt}_${randomUUID()}.png`);
 
-  try {
-    await execAsync(cmd);
-    const imageBuffer = await fs.readFile(filePath);
-    return imageBuffer.toString('base64');
-  } finally {
-    await fs.unlink(filePath).catch(() => undefined);
+    let cmd = `${SCREENCAPTURE_BIN} -x`;
+    if (options.includeCursor) {
+      cmd += ' -C';
+    }
+    cmd += `${regionArg} "${filePath}"`;
+
+    try {
+      await execAsync(cmd);
+
+      const imageBuffer = await fs.readFile(filePath);
+      if (imageBuffer.length === 0) {
+        throw new Error('Capture output file was empty.');
+      }
+
+      return imageBuffer.toString('base64');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (attempt >= CAPTURE_MAX_RETRIES) {
+        throw new Error(`Screen capture failed after ${CAPTURE_MAX_RETRIES} attempts: ${message}`);
+      }
+      await sleep(CAPTURE_RETRY_DELAY_MS * attempt);
+    } finally {
+      await fs.unlink(filePath).catch(() => undefined);
+    }
   }
+
+  throw new Error(`Screen capture failed after ${CAPTURE_MAX_RETRIES} attempts.`);
 }
 
 async function captureSessionFrame(session: LiveSession): Promise<void> {
@@ -362,10 +407,10 @@ async function handleGetLiveFrame(rawArgs: unknown): Promise<CallToolResult> {
   }
 
   const latestFrame = session.latestFrame;
-  if (
-    session.lastCaptureError &&
-    (!latestFrame || session.lastCaptureAttemptAt > latestFrame.capturedAt)
-  ) {
+  const hasFreshCaptureFailure =
+    Boolean(session.lastCaptureError) &&
+    (!latestFrame || session.lastCaptureAttemptAt > latestFrame.capturedAt);
+  if (hasFreshCaptureFailure && !latestFrame) {
     return errorResult('CAPTURE_FAILURE', `Failed to capture frame: ${session.lastCaptureError}`);
   }
 
@@ -389,6 +434,7 @@ async function handleGetLiveFrame(rawArgs: unknown): Promise<CallToolResult> {
           stale_ms: Math.max(0, now - latestFrame.capturedAt),
           expires_at: toIso(session.expiresAt),
           sample_fps: session.sampleFps,
+          capture_warning: hasFreshCaptureFailure ? session.lastCaptureError : undefined,
         }),
       },
     ],
