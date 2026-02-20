@@ -14,12 +14,19 @@ const MAX_BUFFER_SIZE = 10 * 1024 * 1024;
  */
 export class StreamParser extends EventEmitter<StreamParserEvents> {
   private buffer: string = '';
+  private hasWarnedBufferSize = false;
 
   /**
    * Feed raw data from stdout
    */
   feed(chunk: string): void {
     this.buffer += chunk;
+
+    // Warn when approaching buffer limit (80% capacity)
+    if (!this.hasWarnedBufferSize && this.buffer.length > MAX_BUFFER_SIZE * 0.8) {
+      console.warn(`[StreamParser] Buffer approaching limit: ${(this.buffer.length / 1024 / 1024).toFixed(1)}MB / ${MAX_BUFFER_SIZE / 1024 / 1024}MB`);
+      this.hasWarnedBufferSize = true;
+    }
 
     // Prevent memory exhaustion from unbounded buffer growth
     if (this.buffer.length > MAX_BUFFER_SIZE) {
@@ -141,5 +148,6 @@ export class StreamParser extends EventEmitter<StreamParserEvents> {
    */
   reset(): void {
     this.buffer = '';
+    this.hasWarnedBufferSize = false;
   }
 }

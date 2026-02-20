@@ -3,13 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Accomplish Desktop App",
+  "description": "Screen Agent Desktop App - AI assistant that can see your screen",
   "main": "dist-electron/main/index.js",
   "scripts": {
-    "postinstall": "electron-rebuild && npm --prefix skills/dev-browser install && npm --prefix skills/file-permission install",
+    "postinstall": "electron-rebuild && npm --prefix skills/file-permission install && npm --prefix skills/screen-capture install && npm --prefix skills/live-screen-stream install && npm --prefix skills/action-executor install",
     "dev": "node scripts/patch-electron-name.cjs && rm -rf dist-electron && vite",
     "dev:clean": "CLEAN_START=1 vite",
-    "build": "tsc && vite build && npm --prefix skills/dev-browser install --omit=dev && npm --prefix skills/file-permission install --omit=dev",
+    "build": "tsc && vite build && npm --prefix skills/file-permission install --omit=dev && npm --prefix skills/screen-capture install --omit=dev && npm --prefix skills/live-screen-stream install --omit=dev && npm --prefix skills/action-executor install --omit=dev",
     "build:electron": "tsc && vite build && node scripts/package.cjs",
     "build:unpack": "tsc && vite build && node scripts/package.cjs --dir",
     "package": "pnpm build && node scripts/package.cjs --mac --publish never",
@@ -21,6 +21,7 @@
     "lint": "tsc --noEmit",
     "clean": "rm -rf dist dist-electron release",
     "download:nodejs": "node scripts/download-nodejs.cjs",
+    "test:packaged-paths": "node scripts/check-packaged-path-assumptions.cjs",
     "test": "vitest run",
     "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:integration": "vitest run --config vitest.integration.config.ts",
@@ -86,8 +87,8 @@
     "vitest": "^4.0.17"
   },
   "build": {
-    "appId": "ai.accomplish.desktop",
-    "productName": "Openwork",
+    "appId": "ai.screenagent.desktop.localfork",
+    "productName": "Screen Agent",
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "directories": {
       "output": "release",

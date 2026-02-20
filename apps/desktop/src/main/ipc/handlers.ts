@@ -7,21 +7,8 @@ import {
 } from '../opencode/adapter';
 import {
   getTaskManager,
-  disposeTaskManager,
   type TaskCallbacks,
 } from '../opencode/task-manager';
-import {
-  getTasks,
-  getTask,
-  saveTask,
-  updateTaskStatus,
-  updateTaskSessionId,
-  updateTaskSummary,
-  addTaskMessage,
-  deleteTask,
-  clearHistory,
-} from '../store/taskHistory';
-import { generateTaskSummary } from '../services/summarizer';
 import {
   storeApiKey,
   getApiKey,
@@ -41,7 +28,6 @@ import {
   getOllamaConfig,
   setOllamaConfig,
 } from '../store/appSettings';
-import { getDesktopConfig } from '../config';
 import {
   startPermissionApiServer,
   initPermissionApi,
@@ -58,35 +44,47 @@ import type {
   SelectedModel,
   OllamaConfig,
 } from '@accomplish/shared';
-import { DEFAULT_PROVIDERS } from '@accomplish/shared';
 import {
   normalizeIpcError,
   permissionResponseSchema,
-  resumeSessionSchema,
-  taskConfigSchema,
   validate,
+  apiErrorResponseSchema,
+  ollamaTagsResponseSchema,
+  desktopControlStatusRequestSchema,
+  desktopControlStatusResponseSchema,
 } from './validation';
-import {
-  isMockTaskEventsEnabled,
-  createMockTask,
-  executeMockTaskFlow,
-  detectScenarioFromPrompt,
-} from '../test-utils/mock-task-flow';
-import {
-  getScreenSources,
-  getPrimaryDisplay,
-  getAllDisplays,
-  getScreenSourceId,
-} from '../services/screen-capture';
+import { getDesktopControlStatus } from '../desktop-control/preflight';
 
 const MAX_TEXT_LENGTH = 8000;
-const ALLOWED_API_KEY_PROVIDERS = new Set(['anthropic', 'openai', 'google', 'xai', 'custom']);
+const ALLOWED_API_KEY_PROVIDERS = new Set([
+  'anthropic',
+  'openai',
+  'google',
+  'xai',
+  'openrouter',
+  'custom',
+]);
 const API_KEY_VALIDATION_TIMEOUT_MS = 15000;
 
 interface OllamaModel {
   id: string;
   displayName: string;
   size: number;
+}
+
+interface MaskedApiKeyPayload {
+  exists: boolean;
+  prefix?: string;
+}
+
+function toMaskedApiKeyPayload(apiKey: string | null): MaskedApiKeyPayload {
+  if (!apiKey) {
+    return { exists: false };
+  }
+  return {
+    exists: true,
+    prefix: `${apiKey.substring(0, 8)}...`,
+  };
 }
 
 /**
@@ -123,8 +121,7 @@ const messageBatchers = new Map<string, MessageBatcher>();
 
 function createMessageBatcher(
   taskId: string,
-  forwardToRenderer: (channel: string, data: unknown) => void,
-  addTaskMessage: (taskId: string, message: TaskMessage) => void
+  forwardToRenderer: (channel: string, data: unknown) => void
 ): MessageBatcher {
   const batcher: MessageBatcher = {
     pendingMessages: [],
@@ -138,11 +135,6 @@ function createMessageBatcher(
         taskId,
         messages: batcher.pendingMessages,
       });
-
-      // Also persist each message to history
-      for (const msg of batcher.pendingMessages) {
-        addTaskMessage(taskId, msg);
-      }
 
       batcher.pendingMessages = [];
       if (batcher.timeout) {
@@ -159,12 +151,11 @@ function createMessageBatcher(
 function queueMessage(
   taskId: string,
   message: TaskMessage,
-  forwardToRenderer: (channel: string, data: unknown) => void,
-  addTaskMessage: (taskId: string, message: TaskMessage) => void
+  forwardToRenderer: (channel: string, data: unknown) => void
 ): void {
   let batcher = messageBatchers.get(taskId);
   if (!batcher) {
-    batcher = createMessageBatcher(taskId, forwardToRenderer, addTaskMessage);
+    batcher = createMessageBatcher(taskId, forwardToRenderer);
   }
 
   batcher.pendingMessages.push(message);
@@ -247,18 +238,6 @@ function validateTaskConfig(config: TaskConfig): TaskConfig {
   return validated;
 }
 
-/**
- * Check if E2E auth bypass is enabled via global flag, command-line argument, or environment variable
- * Global flag is set by Playwright's app.evaluate() and is most reliable across platforms
- */
-function isE2ESkipAuthEnabled(): boolean {
-  return (
-    (global as Record<string, unknown>).E2E_SKIP_AUTH === true ||
-    process.argv.includes('--e2e-skip-auth') ||
-    process.env.E2E_SKIP_AUTH === '1'
-  );
-}
-
 function handle<Args extends unknown[], ReturnType = unknown>(
   channel: string,
   handler: (event: IpcMainInvokeEvent, ...args: Args) => ReturnType
@@ -283,7 +262,20 @@ export function registerIPCHandlers(): void {
   // Initialize when we have a window (deferred until first task:start)
   let permissionApiInitialized = false;
 
-  // Task: Start a new task
+  // Desktop control: Return preflight readiness status for screen/action tools
+  handle(
+    'desktopControl:getStatus',
+    async (
+      _event: IpcMainInvokeEvent,
+      options?: { forceRefresh?: boolean }
+    ) => {
+      const request = validate(desktopControlStatusRequestSchema, options ?? {});
+      const status = await getDesktopControlStatus(request);
+      return validate(desktopControlStatusResponseSchema, status);
+    }
+  );
+
+  // Task: Start a new task (send message to agent)
   handle('task:start', async (event: IpcMainInvokeEvent, config: TaskConfig) => {
     const window = assertTrustedWindow(BrowserWindow.fromWebContents(event.sender));
     const sender = event.sender;
@@ -297,25 +289,6 @@ export function registerIPCHandlers(): void {
     }
 
     const taskId = createTaskId();
-
-    // E2E Mock Mode: Return mock task and emit simulated events
-    if (isMockTaskEventsEnabled()) {
-      const mockTask = createMockTask(taskId, validatedConfig.prompt);
-      const scenario = detectScenarioFromPrompt(validatedConfig.prompt);
-
-      // Save task to history so Execution page can load it
-      saveTask(mockTask);
-
-      // Execute mock flow asynchronously (sends IPC events)
-      void executeMockTaskFlow(window, {
-        taskId,
-        prompt: validatedConfig.prompt,
-        scenario,
-        delayMs: 50,
-      });
-
-      return mockTask;
-    }
 
     // Setup event forwarding to renderer
     const forwardToRenderer = (channel: string, data: unknown) => {
@@ -331,7 +304,7 @@ export function registerIPCHandlers(): void {
         if (!taskMessage) return;
 
         // Queue message for batching instead of immediate send
-        queueMessage(taskId, taskMessage, forwardToRenderer, addTaskMessage);
+        queueMessage(taskId, taskMessage, forwardToRenderer);
       },
 
       onProgress: (progress: { stage: string; message?: string }) => {
@@ -356,25 +329,6 @@ export function registerIPCHandlers(): void {
           type: 'complete',
           result,
         });
-
-        // Map result status to task status
-        let taskStatus: TaskStatus;
-        if (result.status === 'success') {
-          taskStatus = 'completed';
-        } else if (result.status === 'interrupted') {
-          taskStatus = 'interrupted';
-        } else {
-          taskStatus = 'failed';
-        }
-
-        // Update task status in history
-        updateTaskStatus(taskId, taskStatus, new Date().toISOString());
-
-        // Update session ID if available (important for interrupted tasks to allow continuation)
-        const sessionId = result.sessionId || taskManager.getSessionId(taskId);
-        if (sessionId) {
-          updateTaskSessionId(taskId, sessionId);
-        }
       },
 
       onError: (error: Error) => {
@@ -386,9 +340,6 @@ export function registerIPCHandlers(): void {
           type: 'error',
           error: error.message,
         });
-
-        // Update task status in history
-        updateTaskStatus(taskId, 'failed', new Date().toISOString());
       },
 
       onDebug: (log: { type: string; message: string; data?: unknown }) => {
@@ -407,8 +358,6 @@ export function registerIPCHandlers(): void {
           taskId,
           status,
         });
-        // Update task status in history
-        updateTaskStatus(taskId, status, new Date().toISOString());
       },
     };
 
@@ -424,19 +373,6 @@ export function registerIPCHandlers(): void {
     };
     task.messages = [initialUserMessage];
 
-    // Save task to history (includes the initial user message)
-    saveTask(task);
-
-    // Generate AI summary asynchronously (don't block task execution)
-    generateTaskSummary(validatedConfig.prompt)
-      .then((summary) => {
-        updateTaskSummary(taskId, summary);
-        forwardToRenderer('task:summary', { taskId, summary });
-      })
-      .catch((err) => {
-        console.warn('[IPC] Failed to generate task summary:', err);
-      });
-
     return task;
   });
 
@@ -447,14 +383,12 @@ export function registerIPCHandlers(): void {
     // Check if it's a queued task first
     if (taskManager.isTaskQueued(taskId)) {
       taskManager.cancelQueuedTask(taskId);
-      updateTaskStatus(taskId, 'cancelled', new Date().toISOString());
       return;
     }
 
     // Otherwise cancel the running task
     if (taskManager.hasActiveTask(taskId)) {
       await taskManager.cancelTask(taskId);
-      updateTaskStatus(taskId, 'cancelled', new Date().toISOString());
     }
   });
 
@@ -464,29 +398,8 @@ export function registerIPCHandlers(): void {
 
     if (taskManager.hasActiveTask(taskId)) {
       await taskManager.interruptTask(taskId);
-      // Note: Don't change task status - task is still running, just interrupted
       console.log(`[IPC] Task ${taskId} interrupted`);
     }
-  });
-
-  // Task: Get task from history
-  handle('task:get', async (_event: IpcMainInvokeEvent, taskId: string) => {
-    return getTask(taskId) || null;
-  });
-
-  // Task: List tasks from history
-  handle('task:list', async (_event: IpcMainInvokeEvent) => {
-    return getTasks();
-  });
-
-  // Task: Delete task from history
-  handle('task:delete', async (_event: IpcMainInvokeEvent, taskId: string) => {
-    deleteTask(taskId);
-  });
-
-  // Task: Clear all history
-  handle('task:clear-history', async (_event: IpcMainInvokeEvent) => {
-    clearHistory();
   });
 
   // Permission: Respond to permission request
@@ -524,28 +437,13 @@ export function registerIPCHandlers(): void {
   });
 
   // Session: Resume (continue conversation)
-  handle('session:resume', async (event: IpcMainInvokeEvent, sessionId: string, prompt: string, existingTaskId?: string) => {
+  handle('session:resume', async (event: IpcMainInvokeEvent, sessionId: string, prompt: string) => {
     const window = assertTrustedWindow(BrowserWindow.fromWebContents(event.sender));
     const sender = event.sender;
     const validatedSessionId = sanitizeString(sessionId, 'sessionId', 128);
     const validatedPrompt = sanitizeString(prompt, 'prompt');
-    const validatedExistingTaskId = existingTaskId
-      ? sanitizeString(existingTaskId, 'taskId', 128)
-      : undefined;
 
-    // Use existing task ID or create a new one
-    const taskId = validatedExistingTaskId || createTaskId();
-
-    // Persist the user's follow-up message to task history
-    if (validatedExistingTaskId) {
-      const userMessage: TaskMessage = {
-        id: createMessageId(),
-        type: 'user',
-        content: validatedPrompt,
-        timestamp: new Date().toISOString(),
-      };
-      addTaskMessage(validatedExistingTaskId, userMessage);
-    }
+    const taskId = createTaskId();
 
     // Setup event forwarding to renderer
     const forwardToRenderer = (channel: string, data: unknown) => {
@@ -554,14 +452,13 @@ export function registerIPCHandlers(): void {
       }
     };
 
-    // Create task-scoped callbacks for the TaskManager (with batching for performance)
+    // Create task-scoped callbacks for the TaskManager
     const callbacks: TaskCallbacks = {
       onMessage: (message: OpenCodeMessage) => {
         const taskMessage = toTaskMessage(message);
         if (!taskMessage) return;
 
-        // Queue message for batching instead of immediate send
-        queueMessage(taskId, taskMessage, forwardToRenderer, addTaskMessage);
+        queueMessage(taskId, taskMessage, forwardToRenderer);
       },
 
       onProgress: (progress: { stage: string; message?: string }) => {
@@ -572,13 +469,11 @@ export function registerIPCHandlers(): void {
       },
 
       onPermissionRequest: (request: unknown) => {
-        // Flush pending messages before showing permission request
         flushAndCleanupBatcher(taskId);
         forwardToRenderer('permission:request', request);
       },
 
       onComplete: (result: TaskResult) => {
-        // Flush any pending messages before completing
         flushAndCleanupBatcher(taskId);
 
         forwardToRenderer('task:update', {
@@ -586,29 +481,9 @@ export function registerIPCHandlers(): void {
           type: 'complete',
           result,
         });
-
-        // Map result status to task status
-        let taskStatus: TaskStatus;
-        if (result.status === 'success') {
-          taskStatus = 'completed';
-        } else if (result.status === 'interrupted') {
-          taskStatus = 'interrupted';
-        } else {
-          taskStatus = 'failed';
-        }
-
-        // Update task status in history
-        updateTaskStatus(taskId, taskStatus, new Date().toISOString());
-
-        // Update session ID if available (important for interrupted tasks to allow continuation)
-        const newSessionId = result.sessionId || taskManager.getSessionId(taskId);
-        if (newSessionId) {
-          updateTaskSessionId(taskId, newSessionId);
-        }
       },
 
       onError: (error: Error) => {
-        // Flush any pending messages before error
         flushAndCleanupBatcher(taskId);
 
         forwardToRenderer('task:update', {
@@ -616,9 +491,6 @@ export function registerIPCHandlers(): void {
           type: 'error',
           error: error.message,
         });
-
-        // Update task status in history
-        updateTaskStatus(taskId, 'failed', new Date().toISOString());
       },
 
       onDebug: (log: { type: string; message: string; data?: unknown }) => {
@@ -632,34 +504,24 @@ export function registerIPCHandlers(): void {
       },
 
       onStatusChange: (status: TaskStatus) => {
-        // Notify renderer of status change (e.g., queued -> running)
         forwardToRenderer('task:status-change', {
           taskId,
           status,
         });
-        // Update task status in history
-        updateTaskStatus(taskId, status, new Date().toISOString());
       },
     };
 
-    // Start the task via TaskManager with sessionId for resume (creates isolated adapter or queues if busy)
+    // Start the task via TaskManager with sessionId for resume
     const task = await taskManager.startTask(taskId, {
       prompt: validatedPrompt,
       sessionId: validatedSessionId,
       taskId,
     }, callbacks);
 
-    // Update task status in history (whether running or queued)
-    if (validatedExistingTaskId) {
-      updateTaskStatus(validatedExistingTaskId, task.status, new Date().toISOString());
-    }
-
     return task;
   });
 
   // Settings: Get API keys
-  // Note: In production, this should fetch from backend to get metadata
-  // The actual keys are stored locally in secure storage
   handle('settings:api-keys', async (_event: IpcMainInvokeEvent) => {
     const storedCredentials = await listStoredCredentials();
 
@@ -709,7 +571,6 @@ export function registerIPCHandlers(): void {
 
   // Settings: Remove API key
   handle('settings:remove-api-key', async (_event: IpcMainInvokeEvent, id: string) => {
-    // Extract provider from id (format: local-{provider})
     const sanitizedId = sanitizeString(id, 'id', 128);
     const provider = sanitizedId.replace('local-', '');
     await deleteApiKey(provider);
@@ -730,7 +591,8 @@ export function registerIPCHandlers(): void {
 
   // API Key: Get API key
   handle('api-key:get', async (_event: IpcMainInvokeEvent) => {
-    return getApiKey('anthropic');
+    const apiKey = getApiKey('anthropic');
+    return toMaskedApiKeyPayload(apiKey);
   });
 
   // API Key: Validate API key by making a test request
@@ -739,7 +601,6 @@ export function registerIPCHandlers(): void {
     console.log('[API Key] Validation requested');
 
     try {
-      // Make a simple API call to validate the key
       const response = await fetchWithTimeout(
         'https://api.anthropic.com/v1/messages',
         {
@@ -763,8 +624,8 @@ export function registerIPCHandlers(): void {
         return { valid: true };
       }
 
-      const errorData = await response.json().catch(() => ({}));
-      const errorMessage = (errorData as { error?: { message?: string } })?.error?.message || `API returned status ${response.status}`;
+      const errorData = apiErrorResponseSchema.safeParse(await response.json().catch(() => ({})));
+      const errorMessage = (errorData.success ? errorData.data.error?.message : undefined) || `API returned status ${response.status}`;
 
       console.warn('[API Key] Validation failed', { status: response.status, error: errorMessage });
 
@@ -846,6 +707,19 @@ export function registerIPCHandlers(): void {
           );
           break;
 
+        case 'openrouter':
+          response = await fetchWithTimeout(
+            'https://openrouter.ai/api/v1/models',
+            {
+              method: 'GET',
+              headers: {
+                Authorization: `Bearer ${sanitizedKey}`,
+              },
+            },
+            API_KEY_VALIDATION_TIMEOUT_MS
+          );
+          break;
+
         default:
           // For 'custom' provider, skip validation
           console.log('[API Key] Skipping validation for custom provider');
@@ -857,8 +731,8 @@ export function registerIPCHandlers(): void {
         return { valid: true };
       }
 
-      const errorData = await response.json().catch(() => ({}));
-      const errorMessage = (errorData as { error?: { message?: string } })?.error?.message || `API returned status ${response.status}`;
+      const errorData = apiErrorResponseSchema.safeParse(await response.json().catch(() => ({})));
+      const errorMessage = (errorData.success ? errorData.data.error?.message : undefined) || `API returned status ${response.status}`;
 
       console.warn(`[API Key] Validation failed for ${provider}`, { status: response.status, error: errorMessage });
       return { valid: false, error: errorMessage };
@@ -879,15 +753,6 @@ export function registerIPCHandlers(): void {
 
   // OpenCode CLI: Check if installed
   handle('opencode:check', async (_event: IpcMainInvokeEvent) => {
-    // E2E test bypass: return mock CLI status when E2E skip auth is enabled
-    if (isE2ESkipAuthEnabled()) {
-      return {
-        installed: true,
-        version: '1.0.0-test',
-        installCommand: 'npm install -g opencode-ai',
-      };
-    }
-
     const installed = await isOpenCodeCliInstalled();
     const version = installed ? await getOpenCodeCliVersion() : null;
     return {
@@ -940,8 +805,10 @@ export function registerIPCHandlers(): void {
         throw new Error(`Ollama returned status ${response.status}`);
       }
 
-      const data = await response.json() as { models?: Array<{ name: string; size: number }> };
-      const models: OllamaModel[] = (data.models || []).map((m) => ({
+      const rawData = await response.json();
+      const parsed = ollamaTagsResponseSchema.safeParse(rawData);
+      const modelsList = parsed.success ? parsed.data.models : [];
+      const models: OllamaModel[] = modelsList.map((m) => ({
         id: m.name,
         displayName: m.name,
         size: m.size,
@@ -979,15 +846,13 @@ export function registerIPCHandlers(): void {
         }
       } catch (e) {
         if (e instanceof Error && e.message.includes('http')) {
-          throw e; // Re-throw our protocol error
+          throw e;
         }
         throw new Error('Invalid base URL format');
       }
-      // Validate optional lastValidated if present
       if (config.lastValidated !== undefined && typeof config.lastValidated !== 'number') {
         throw new Error('Invalid Ollama configuration');
       }
-      // Validate optional models array if present
       if (config.models !== undefined) {
         if (!Array.isArray(config.models)) {
           throw new Error('Invalid Ollama configuration: models must be an array');
@@ -1006,23 +871,15 @@ export function registerIPCHandlers(): void {
   // API Keys: Get all API keys (with masked values)
   handle('api-keys:all', async (_event: IpcMainInvokeEvent) => {
     const keys = await getAllApiKeys();
-    // Return masked versions for UI
     const masked: Record<string, { exists: boolean; prefix?: string }> = {};
     for (const [provider, key] of Object.entries(keys)) {
-      masked[provider] = {
-        exists: Boolean(key),
-        prefix: key ? key.substring(0, 8) + '...' : undefined,
-      };
+      masked[provider] = toMaskedApiKeyPayload(key);
     }
     return masked;
   });
 
   // API Keys: Check if any key exists
   handle('api-keys:has-any', async (_event: IpcMainInvokeEvent) => {
-    // In E2E mock mode, pretend we have API keys
-    if (isMockTaskEventsEnabled()) {
-      return true;
-    }
     return hasAnyApiKey();
   });
 
@@ -1045,27 +902,8 @@ export function registerIPCHandlers(): void {
   });
 
   // Onboarding: Get onboarding complete status
-  // Also checks for existing task history to handle upgrades from pre-onboarding versions
   handle('onboarding:complete', async (_event: IpcMainInvokeEvent) => {
-    // E2E test bypass: skip onboarding when E2E skip auth is enabled
-    if (isE2ESkipAuthEnabled()) {
-      return true;
-    }
-
-    // If onboarding is already marked complete, return true
-    if (getOnboardingComplete()) {
-      return true;
-    }
-
-    // Check if this is an existing user (has task history)
-    // If so, mark onboarding as complete and skip the wizard
-    const tasks = getTasks();
-    if (tasks.length > 0) {
-      setOnboardingComplete(true);
-      return true;
-    }
-
-    return false;
+    return getOnboardingComplete();
   });
 
   // Onboarding: Set onboarding complete status
@@ -1074,7 +912,6 @@ export function registerIPCHandlers(): void {
   });
 
   // Shell: Open URL in external browser
-  // Only allows http/https URLs for security
   handle('shell:open-external', async (_event: IpcMainInvokeEvent, url: string) => {
     try {
       const parsed = new URL(url);
@@ -1087,6 +924,7 @@ export function registerIPCHandlers(): void {
       throw error;
     }
   });
+<<<<<<< HEAD
 
   // Log event handler - now just returns ok (no external logging)
   handle(
@@ -1130,6 +968,8 @@ export function registerIPCHandlers(): void {
       throw error;
     }
   });
+=======
+>>>>>>> 579c22c (Add .env.example and bugs/features tracker)
 }
 
 function createTaskId(): string {
@@ -1142,7 +982,6 @@ function createMessageId(): string {
 
 /**
  * Extract base64 screenshots from tool output
- * Returns cleaned text (with images replaced by placeholders) and extracted attachments
  */
 function extractScreenshots(output: string): {
   cleanedText: string;
@@ -1150,38 +989,32 @@ function extractScreenshots(output: string): {
 } {
   const attachments: Array<{ type: 'screenshot' | 'json'; data: string; label?: string }> = [];
 
-  // Match data URLs (data:image/png;base64,...)
   const dataUrlRegex = /data:image\/(png|jpeg|jpg|webp);base64,[A-Za-z0-9+/=]+/g;
   let match;
   while ((match = dataUrlRegex.exec(output)) !== null) {
     attachments.push({
       type: 'screenshot',
       data: match[0],
-      label: 'Browser screenshot',
+      label: 'Screenshot',
     });
   }
 
-  // Also check for raw base64 PNG (starts with iVBORw0)
-  // This pattern matches PNG base64 that isn't already a data URL
   const rawBase64Regex = /(?<![;,])(?:^|["\s])?(iVBORw0[A-Za-z0-9+/=]{100,})(?:["\s]|$)/g;
   while ((match = rawBase64Regex.exec(output)) !== null) {
     const base64Data = match[1];
-    // Wrap in data URL if it's valid base64 PNG
     if (base64Data && base64Data.length > 100) {
       attachments.push({
         type: 'screenshot',
         data: `data:image/png;base64,${base64Data}`,
-        label: 'Browser screenshot',
+        label: 'Screenshot',
       });
     }
   }
 
-  // Clean the text - replace image data with placeholder
   let cleanedText = output
     .replace(dataUrlRegex, '[Screenshot captured]')
     .replace(rawBase64Regex, '[Screenshot captured]');
 
-  // Also clean up common JSON wrappers around screenshots
   cleanedText = cleanedText
     .replace(/"[Screenshot captured]"/g, '"[Screenshot]"')
     .replace(/\[Screenshot captured\]\[Screenshot captured\]/g, '[Screenshot captured]');
@@ -1190,47 +1023,31 @@ function extractScreenshots(output: string): {
 }
 
 /**
- * Sanitize tool output to remove technical details that confuse users
+ * Sanitize tool output to remove technical details
  */
 function sanitizeToolOutput(text: string, isError: boolean): string {
   let result = text;
 
-  // Strip any remaining ANSI escape codes
   result = result.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
-  // Also strip any leftover escape sequences that may have been partially matched
   result = result.replace(/\x1B\[2m|\x1B\[22m|\x1B\[0m/g, '');
-
-  // Remove WebSocket URLs
   result = result.replace(/ws:\/\/[^\s\]]+/g, '[connection]');
-
-  // Remove "Call log:" sections and everything after
   result = result.replace(/\s*Call log:[\s\S]*/i, '');
 
-  // Simplify common Playwright/CDP errors for users
   if (isError) {
-    // Timeout errors: extract just the timeout duration
     const timeoutMatch = result.match(/timed? ?out after (\d+)ms/i);
     if (timeoutMatch) {
       const seconds = Math.round(parseInt(timeoutMatch[1]) / 1000);
       return `Timed out after ${seconds}s`;
     }
 
-    // "browserType.connectOverCDP: Protocol error (X): Y" → "Y"
     const protocolMatch = result.match(/Protocol error \([^)]+\):\s*(.+)/i);
     if (protocolMatch) {
       result = protocolMatch[1].trim();
     }
 
-    // "Error executing code: X" → just the meaningful part
     result = result.replace(/^Error executing code:\s*/i, '');
-
-    // Clean up "browserType.connectOverCDP:" prefix
     result = result.replace(/browserType\.connectOverCDP:\s*/i, '');
-
-    // Remove stack traces (lines starting with "at ")
     result = result.replace(/\s+at\s+.+/g, '');
-
-    // Remove error class names like "CodeExecutionTimeoutError:"
     result = result.replace(/\w+Error:\s*/g, '');
   }
 
@@ -1238,9 +1055,6 @@ function sanitizeToolOutput(text: string, isError: boolean): string {
 }
 
 function toTaskMessage(message: OpenCodeMessage): TaskMessage | null {
-  // OpenCode format: step_start, text, tool_call, tool_use, tool_result, step_finish
-
-  // Handle text content
   if (message.type === 'text') {
     if (message.part.text) {
       return {
@@ -1253,7 +1067,6 @@ function toTaskMessage(message: OpenCodeMessage): TaskMessage | null {
     return null;
   }
 
-  // Handle tool calls (legacy format - just shows tool is starting)
   if (message.type === 'tool_call') {
     return {
       id: createMessageId(),
@@ -1265,7 +1078,6 @@ function toTaskMessage(message: OpenCodeMessage): TaskMessage | null {
     };
   }
 
-  // Handle tool_use messages (combined tool call + result)
   if (message.type === 'tool_use') {
     const toolUseMsg = message as import('@accomplish/shared').OpenCodeToolUseMessage;
     const toolName = toolUseMsg.part.tool || 'unknown';
@@ -1273,16 +1085,11 @@ function toTaskMessage(message: OpenCodeMessage): TaskMessage | null {
     const toolOutput = toolUseMsg.part.state?.output || '';
     const status = toolUseMsg.part.state?.status;
 
-    // Only create message for completed/error status (not pending/running)
     if (status === 'completed' || status === 'error') {
-      // Extract screenshots from tool output
       const { cleanedText, attachments } = extractScreenshots(toolOutput);
-
-      // Sanitize output - more aggressive for errors
       const isError = status === 'error';
       const sanitizedText = sanitizeToolOutput(cleanedText, isError);
 
-      // Truncate long outputs for display
       const displayText = sanitizedText.length > 500
         ? sanitizedText.substring(0, 500) + '...'
         : sanitizedText;

@@ -122,8 +122,9 @@ async function copyNodeBinary(context, platform, arch) {
   let destDir;
   if (platformName === 'mac') {
     // For universal builds, we need to include the arch in the path
-    // macOS app bundle structure: Accomplish.app/Contents/Resources/
-    destDir = path.join(appOutDir, 'Accomplish.app', 'Contents', 'Resources', 'nodejs', arch);
+    // macOS app bundle structure: <ProductName>.app/Contents/Resources/
+    const appName = packager.appInfo.productFilename;
+    destDir = path.join(appOutDir, `${appName}.app`, 'Contents', 'Resources', 'nodejs', arch);
   } else {
     // Windows/Linux: <app>/resources/
     destDir = path.join(appOutDir, 'resources', 'nodejs', arch);
@@ -158,7 +159,56 @@ async function copyNodeBinary(context, platform, arch) {
     }
   }
 
+  validateNodePlacement(context, platformName, arch, destDir);
+
   console.log(`[after-pack] Successfully copied Node.js ${arch} to ${destDir}`);
+}
+
+/**
+ * Validate that the copied Node.js bundle is in the expected location
+ * and includes the required executables for the target platform.
+ */
+function validateNodePlacement(context, platformName, arch, destDir) {
+  const { packager, appOutDir } = context;
+  const appName = packager.appInfo.productFilename;
+
+  const expectedDir = platformName === 'mac'
+    ? path.join(appOutDir, `${appName}.app`, 'Contents', 'Resources', 'nodejs', arch)
+    : path.join(appOutDir, 'resources', 'nodejs', arch);
+
+  const resolvedDestDir = path.resolve(destDir);
+  const resolvedExpectedDir = path.resolve(expectedDir);
+
+  if (resolvedDestDir !== resolvedExpectedDir) {
+    throw new Error(
+      `[after-pack] Node.js ${arch} copied to unexpected path: ${destDir}. ` +
+      `Expected: ${expectedDir}`
+    );
+  }
+
+  if (!fs.existsSync(expectedDir)) {
+    throw new Error(`[after-pack] Node.js ${arch} destination directory missing: ${expectedDir}`);
+  }
+
+  const requiredFiles = platformName === 'windows'
+    ? ['node.exe', 'npm.cmd', 'npx.cmd']
+    : ['bin/node', 'bin/npm', 'bin/npx'];
+
+  const missing = requiredFiles.filter((relativeFile) => {
+    const fullPath = path.join(expectedDir, relativeFile);
+    return !fs.existsSync(fullPath);
+  });
+
+  if (missing.length > 0) {
+    throw new Error(
+      `[after-pack] Node.js ${arch} placement validation failed for ${platformName}: ` +
+      `missing required files in ${expectedDir}: ${missing.join(', ')}`
+    );
+  }
+
+  console.log(
+    `[after-pack] Placement validated for ${platformName}/${arch}: ${expectedDir}`
+  );
 }
 
 /**

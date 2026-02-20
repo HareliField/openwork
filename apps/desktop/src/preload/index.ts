@@ -101,7 +101,7 @@ const accomplishAPI = {
   // Settings
   getApiKeys: (): Promise<unknown[]> => ipcRenderer.invoke('settings:api-keys'),
   addApiKey: (
-    provider: 'anthropic' | 'openai' | 'google' | 'xai' | 'custom',
+    provider: 'anthropic' | 'openai' | 'google' | 'xai' | 'openrouter' | 'custom',
     key: string,
     label?: string
   ): Promise<unknown> =>
@@ -120,7 +120,7 @@ const accomplishAPI = {
     ipcRenderer.invoke('api-key:exists'),
   setApiKey: (key: string): Promise<void> =>
     ipcRenderer.invoke('api-key:set', key),
-  getApiKey: (): Promise<string | null> =>
+  getApiKey: (): Promise<{ exists: boolean; prefix?: string }> =>
     ipcRenderer.invoke('api-key:get'),
   validateApiKey: (key: string): Promise<{ valid: boolean; error?: string }> =>
     ipcRenderer.invoke('api-key:validate', key),
@@ -219,34 +219,33 @@ const accomplishAPI = {
   logEvent: (payload: { level?: string; message: string; context?: Record<string, unknown> }) =>
     ipcRenderer.invoke('log:event', payload),
 
-  // Screen Capture
-  getScreenSources: (options?: { types?: ('screen' | 'window')[] }): Promise<Array<{
-    id: string;
-    name: string;
-    thumbnailDataUrl: string;
-    displayId: string;
-    appIconDataUrl?: string;
-  }>> => ipcRenderer.invoke('screen:get-sources', options),
+  // Window controls
+  toggleAlwaysOnTop: (): Promise<boolean> =>
+    ipcRenderer.invoke('window:toggle-always-on-top'),
+  minimizeWindow: (): Promise<void> =>
+    ipcRenderer.invoke('window:minimize'),
+  showWindow: (): Promise<void> =>
+    ipcRenderer.invoke('window:show'),
 
-  getPrimaryDisplay: (): Promise<{
-    id: string;
-    bounds: { x: number; y: number; width: number; height: number };
-    scaleFactor: number;
-    size: { width: number; height: number };
-    workArea: { x: number; y: number; width: number; height: number };
-  }> => ipcRenderer.invoke('screen:get-primary-display'),
-
-  getAllDisplays: (): Promise<Array<{
-    id: string;
-    bounds: { x: number; y: number; width: number; height: number };
-    scaleFactor: number;
-    size: { width: number; height: number };
-    workArea: { x: number; y: number; width: number; height: number };
-    isPrimary: boolean;
-  }>> => ipcRenderer.invoke('screen:get-all-displays'),
-
-  getScreenSourceId: (displayId?: string): Promise<string | null> =>
-    ipcRenderer.invoke('screen:get-source-id', displayId),
+  // Smart trigger
+  getSmartTriggerConfig: (): Promise<{
+    enabled: boolean;
+    idleThresholdSeconds: number;
+    minActivitySeconds: number;
+    checkIntervalMs: number;
+  }> => ipcRenderer.invoke('smart-trigger:get-config'),
+  setSmartTriggerConfig: (config: {
+    enabled?: boolean;
+    idleThresholdSeconds?: number;
+    minActivitySeconds?: number;
+    checkIntervalMs?: number;
+  }): Promise<unknown> => ipcRenderer.invoke('smart-trigger:set-config', config),
+  notifyActivity: () => ipcRenderer.send('smart-trigger:activity'),
+  onSmartTrigger: (callback: (data: { reason: string; timestamp: number }) => void) => {
+    const listener = (_: unknown, data: { reason: string; timestamp: number }) => callback(data);
+    ipcRenderer.on('smart-trigger:triggered', listener);
+    return () => ipcRenderer.removeListener('smart-trigger:triggered', listener);
+  },
 };
 
 // Expose the API to the renderer

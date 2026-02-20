@@ -1,8 +1,8 @@
 {
-  "name": "accomplish",
+  "name": "screen-agent",
   "version": "0.1.0",
   "private": true,
-  "description": "The open source AI coworker that lives on your desktop",
+  "description": "AI assistant that can see your screen and help you navigate your Mac",
   "author": "Accomplish Inc",
   "license": "MIT",
   "repository": {
@@ -13,9 +13,11 @@
     "dev": "pnpm -F @accomplish/desktop dev",
     "build": "pnpm -r build",
     "build:desktop": "pnpm -F @accomplish/desktop build",
+    "package:mac": "pnpm -F @accomplish/desktop package:mac",
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",
-    "clean": "pnpm -r clean && rm -rf node_modules"
+    "clean": "pnpm -r clean && rm -rf node_modules",
+    "diagnostics:desktop-control": "node scripts/desktop-control-healthcheck/run-all-diagnostics.mjs"
   },
   "engines": {
     "node": ">=20.0.0",
@@ -23,6 +25,7 @@
   },
   "packageManager": "pnpm@9.15.0",
   "devDependencies": {
+    "electron-builder": "^25.1.8",
     "next": "^15.1.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

@@ -111,11 +111,48 @@ describe('DiagnosticsPanel state mapping', () => {
     expect(screen.getByTestId('desktop-control-diagnostics-panel')).toBeTruthy();
     expect(screen.getByText(/^Unknown/)).toBeTruthy();
   });
+
+  it('renders diagnostic metadata for blocked capability states', () => {
+    render(
+      <DiagnosticsPanel
+        status={buildStatus('needs_screen_recording_permission', {
+          checks: {
+            ...BASE_STATUS.checks,
+            screen_capture: {
+              ...BASE_STATUS.checks.screen_capture,
+              status: 'blocked',
+              errorCode: 'screen_recording_permission_denied',
+              message: 'Screen recording permission is denied.',
+              remediation: {
+                title: 'Allow Screen Recording',
+                steps: [
+                  'Open System Settings > Privacy & Security > Screen Recording.',
+                  'Enable permission for Screen Agent.',
+                  'Quit and reopen Screen Agent, then recheck status.',
+                ],
+                systemSettingsPath: 'System Settings > Privacy & Security > Screen Recording',
+              },
+              details: {
+                readinessReasonCode: 'screen_capture_permission_denied',
+                attempts: [{ attempt: 1, durationMs: 4, outcome: 'ok' }],
+              },
+            },
+          },
+        })}
+      />
+    );
+
+    expect(screen.getByText('Allow Screen Recording')).toBeTruthy();
+    expect(screen.getByText('Error code: screen_recording_permission_denied.')).toBeTruthy();
+    expect(screen.getByText('Reason code: screen_capture_permission_denied.')).toBeTruthy();
+    expect(screen.getByText('Probe attempts: 1 (last outcome: ok).')).toBeTruthy();
+    expect(screen.getByText(/Open: System Settings > Privacy & Security > Screen Recording/)).toBeTruthy();
+  });
 });
 
 describe('DiagnosticsPanel recheck behavior', () => {
   it('shows loading state while async recheck is pending', async () => {
-    let resolveRecheck: (() => void) | null = null;
+    let resolveRecheck!: () => void;
     const onRecheck = vi.fn(
       () =>
         new Promise<void>((resolve) => {
@@ -131,7 +168,7 @@ describe('DiagnosticsPanel recheck behavior', () => {
     expect(button.disabled).toBe(true);
     expect(onRecheck).toHaveBeenCalledTimes(1);
 
-    resolveRecheck?.();
+    resolveRecheck();
     await waitFor(() => {
       expect(screen.getByTestId('desktop-control-recheck-success')).toBeTruthy();
     });

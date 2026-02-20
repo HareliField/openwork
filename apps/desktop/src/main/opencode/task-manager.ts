@@ -9,6 +9,11 @@
 import { OpenCodeAdapter, isOpenCodeCliInstalled, OpenCodeCliNotFoundError } from './adapter';
 import { getSkillsPath } from './config-generator';
 import { getNpxPath, getBundledNodePaths } from '../utils/bundled-node';
+import {
+  McpSupervisor,
+  type McpHealthEvent,
+  type McpRestartRequest,
+} from './mcp-supervisor';
 import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
@@ -176,7 +181,18 @@ async function ensureDevBrowserServer(
   // Now start the server
   try {
     const skillsPath = getSkillsPath();
-    const serverScript = path.join(skillsPath, 'dev-browser', 'server.sh');
+    const devBrowserDir = path.join(skillsPath, 'dev-browser');
+    const serverScript = path.join(devBrowserDir, 'server.sh');
+
+    // Check if the dev-browser directory and script exist before attempting to spawn
+    if (!fs.existsSync(devBrowserDir)) {
+      console.log('[TaskManager] Dev-browser directory not found, skipping server start:', devBrowserDir);
+      return;
+    }
+    if (!fs.existsSync(serverScript)) {
+      console.log('[TaskManager] Dev-browser server script not found, skipping:', serverScript);
+      return;
+    }
 
     // Build environment with bundled Node.js in PATH
     const bundledPaths = getBundledNodePaths();
@@ -188,10 +204,12 @@ async function ensureDevBrowserServer(
     }
 
     // Spawn server in background (detached, unref to not block)
-    const child = spawn('bash', [serverScript], {
+    // Use /bin/sh for better compatibility (bash may not exist on all systems)
+    const shellPath = process.platform === 'win32' ? 'bash' : '/bin/sh';
+    const child = spawn(shellPath, [serverScript], {
       detached: true,
       stdio: 'ignore',
-      cwd: path.join(skillsPath, 'dev-browser'),
+      cwd: devBrowserDir,
       env: spawnEnv,
     });
     child.unref();
@@ -213,6 +231,7 @@ export interface TaskCallbacks {
   onError: (error: Error) => void;
   onStatusChange?: (status: TaskStatus) => void;
   onDebug?: (log: { type: string; message: string; data?: unknown }) => void;
+  onMcpHealthEvent?: (event: McpHealthEvent) => void;
 }
 
 /**
@@ -221,8 +240,15 @@ export interface TaskCallbacks {
 interface ManagedTask {
   taskId: string;
   adapter: OpenCodeAdapter;
+  config: TaskConfig;
+  supervisor: McpSupervisor;
   callbacks: TaskCallbacks;
+  detachAdapterListeners: () => void;
   cleanup: () => void;
+  recoveryInFlight: Promise<boolean> | null;
+  isCleaningUp: boolean;
+  startupPhase: 'initializing' | 'starting-cli' | 'running';
+  cancelRequestedAtMs: number | null;
   createdAt: Date;
 }
 
@@ -330,67 +356,37 @@ export class TaskManager {
     config: TaskConfig,
     callbacks: TaskCallbacks
   ): Promise<Task> {
-    // Create a new adapter instance for this task
     const adapter = new OpenCodeAdapter(taskId);
+    const supervisor = this.createMcpSupervisor(taskId, callbacks);
 
-    // Wire up event listeners
-    const onMessage = (message: OpenCodeMessage) => {
-      callbacks.onMessage(message);
-    };
-
-    const onProgress = (progress: { stage: string; message?: string }) => {
-      callbacks.onProgress(progress);
-    };
-
-    const onPermissionRequest = (request: PermissionRequest) => {
-      callbacks.onPermissionRequest(request);
-    };
-
-    const onComplete = (result: TaskResult) => {
-      callbacks.onComplete(result);
-      // Auto-cleanup on completion and process queue
-      this.cleanupTask(taskId);
-      this.processQueue();
-    };
-
-    const onError = (error: Error) => {
-      callbacks.onError(error);
-      // Auto-cleanup on error and process queue
-      this.cleanupTask(taskId);
-      this.processQueue();
-    };
-
-    const onDebug = (log: { type: string; message: string; data?: unknown }) => {
-      callbacks.onDebug?.(log);
-    };
-
-    // Attach listeners
-    adapter.on('message', onMessage);
-    adapter.on('progress', onProgress);
-    adapter.on('permission-request', onPermissionRequest);
-    adapter.on('complete', onComplete);
-    adapter.on('error', onError);
-    adapter.on('debug', onDebug);
-
-    // Create cleanup function
-    const cleanup = () => {
-      adapter.off('message', onMessage);
-      adapter.off('progress', onProgress);
-      adapter.off('permission-request', onPermissionRequest);
-      adapter.off('complete', onComplete);
-      adapter.off('error', onError);
-      adapter.off('debug', onDebug);
-      adapter.dispose();
-    };
-
-    // Register the managed task
     const managedTask: ManagedTask = {
       taskId,
       adapter,
+      config: { ...config, taskId },
+      supervisor,
       callbacks,
-      cleanup,
+      detachAdapterListeners: () => {},
+      cleanup: () => {},
+      recoveryInFlight: null,
+      isCleaningUp: false,
+      startupPhase: 'initializing',
+      cancelRequestedAtMs: null,
       createdAt: new Date(),
     };
+
+    managedTask.detachAdapterListeners = this.attachAdapterListeners(managedTask, adapter);
+    managedTask.cleanup = () => {
+      if (managedTask.isCleaningUp) {
+        return;
+      }
+
+      managedTask.isCleaningUp = true;
+      managedTask.supervisor.dispose('Task cleanup');
+      managedTask.detachAdapterListeners();
+      managedTask.adapter.dispose();
+      managedTask.recoveryInFlight = null;
+    };
+
     this.activeTasks.set(taskId, managedTask);
 
     console.log(`[TaskManager] Executing task ${taskId}. Active tasks: ${this.activeTasks.size}`);
@@ -412,8 +408,40 @@ export class TaskManager {
         await ensureDevBrowserServer(callbacks.onProgress);
 
         // Now start the agent
-        await adapter.startTask({ ...config, taskId });
+        const currentTask = this.activeTasks.get(taskId);
+        if (!currentTask || currentTask.isCleaningUp) {
+          this.emitRaceTelemetry(callbacks, taskId, 'start-aborted-before-cli-launch', {
+            reason: 'task-inactive-after-setup',
+            activeTaskCount: this.activeTasks.size,
+            queueLength: this.taskQueue.length,
+          });
+          return;
+        }
+        currentTask.startupPhase = 'starting-cli';
+        await currentTask.adapter.startTask(currentTask.config);
+
+        const startedTask = this.activeTasks.get(taskId);
+        if (!startedTask || startedTask.isCleaningUp) {
+          this.emitRaceTelemetry(callbacks, taskId, 'start-finished-after-cancel', {
+            reason: 'task-inactive-after-cli-start',
+            activeTaskCount: this.activeTasks.size,
+            queueLength: this.taskQueue.length,
+          });
+          return;
+        }
+        startedTask.startupPhase = 'running';
       } catch (error) {
+        const currentTask = this.activeTasks.get(taskId);
+        if (!currentTask || currentTask.isCleaningUp) {
+          this.emitRaceTelemetry(callbacks, taskId, 'start-error-after-cancel', {
+            reason: 'task-inactive-during-start-error',
+            error: error instanceof Error ? error.message : String(error),
+            activeTaskCount: this.activeTasks.size,
+            queueLength: this.taskQueue.length,
+          });
+          return;
+        }
+
         // Cleanup on failure and process queue
         callbacks.onError(error instanceof Error ? error : new Error(String(error)));
         this.cleanupTask(taskId);
@@ -422,6 +450,182 @@ export class TaskManager {
     })();
 
     return task;
+  }
+
+  private attachAdapterListeners(managedTask: ManagedTask, adapter: OpenCodeAdapter): () => void {
+    const onMessage = (message: OpenCodeMessage) => {
+      if (!this.activeTasks.has(managedTask.taskId) || managedTask.adapter !== adapter) {
+        return;
+      }
+      managedTask.callbacks.onMessage(message);
+      managedTask.supervisor.observeMessage(message);
+    };
+
+    const onProgress = (progress: { stage: string; message?: string }) => {
+      if (!this.activeTasks.has(managedTask.taskId) || managedTask.adapter !== adapter) {
+        return;
+      }
+      managedTask.callbacks.onProgress(progress);
+    };
+
+    const onPermissionRequest = (request: PermissionRequest) => {
+      if (!this.activeTasks.has(managedTask.taskId) || managedTask.adapter !== adapter) {
+        return;
+      }
+      managedTask.callbacks.onPermissionRequest(request);
+    };
+
+    const onComplete = (result: TaskResult) => {
+      if (!this.activeTasks.has(managedTask.taskId) || managedTask.adapter !== adapter || managedTask.isCleaningUp) {
+        return;
+      }
+      managedTask.callbacks.onComplete(result);
+      this.cleanupTask(managedTask.taskId);
+      this.processQueue();
+    };
+
+    const onError = (error: Error) => {
+      if (!this.activeTasks.has(managedTask.taskId) || managedTask.adapter !== adapter || managedTask.isCleaningUp) {
+        return;
+      }
+      managedTask.callbacks.onError(error);
+      this.cleanupTask(managedTask.taskId);
+      this.processQueue();
+    };
+
+    const onDebug = (log: { type: string; message: string; data?: unknown }) => {
+      if (!this.activeTasks.has(managedTask.taskId) || managedTask.adapter !== adapter) {
+        return;
+      }
+      managedTask.callbacks.onDebug?.(log);
+      managedTask.supervisor.observeDebugLog(log);
+    };
+
+    adapter.on('message', onMessage);
+    adapter.on('progress', onProgress);
+    adapter.on('permission-request', onPermissionRequest);
+    adapter.on('complete', onComplete);
+    adapter.on('error', onError);
+    adapter.on('debug', onDebug);
+
+    return () => {
+      adapter.off('message', onMessage);
+      adapter.off('progress', onProgress);
+      adapter.off('permission-request', onPermissionRequest);
+      adapter.off('complete', onComplete);
+      adapter.off('error', onError);
+      adapter.off('debug', onDebug);
+    };
+  }
+
+  private emitRaceTelemetry(
+    callbacks: TaskCallbacks | undefined,
+    taskId: string,
+    event: string,
+    details: Record<string, unknown> = {}
+  ): void {
+    callbacks?.onDebug?.({
+      type: 'task-race-telemetry',
+      message: `[TaskRaceTelemetry] ${event}`,
+      data: {
+        taskId,
+        event,
+        timestamp: new Date().toISOString(),
+        ...details,
+      },
+    });
+  }
+
+  private createMcpSupervisor(taskId: string, callbacks: TaskCallbacks): McpSupervisor {
+    const supervisor = new McpSupervisor({
+      taskId,
+      onRestart: (request) => this.restartTaskForMcpRecovery(request),
+      onHealthEvent: (event) => {
+        callbacks.onMcpHealthEvent?.(event);
+        callbacks.onDebug?.({
+          type: 'mcp-health',
+          message: `[MCP:${event.skill}] ${event.previousStatus} -> ${event.status} (${event.reason})`,
+          data: event,
+        });
+      },
+    });
+
+    return supervisor;
+  }
+
+  private async restartTaskForMcpRecovery(request: McpRestartRequest): Promise<boolean> {
+    const managedTask = this.activeTasks.get(request.taskId);
+    if (!managedTask || managedTask.isCleaningUp) {
+      return false;
+    }
+
+    if (managedTask.recoveryInFlight) {
+      return managedTask.recoveryInFlight;
+    }
+
+    managedTask.recoveryInFlight = (async () => {
+      const activeTask = this.activeTasks.get(request.taskId);
+      if (!activeTask || activeTask !== managedTask || managedTask.isCleaningUp) {
+        return false;
+      }
+
+      const previousAdapter = managedTask.adapter;
+      const previousDetach = managedTask.detachAdapterListeners;
+      const previousSessionId = previousAdapter.getSessionId() || managedTask.config.sessionId;
+      let replacementAdapter: OpenCodeAdapter | null = null;
+
+      managedTask.callbacks.onProgress({
+        stage: 'setup',
+        message: `Recovering MCP skill "${request.skill}" (attempt ${request.attempt})`,
+      });
+
+      try {
+        previousDetach();
+        previousAdapter.dispose();
+
+        if (managedTask.isCleaningUp || !this.activeTasks.has(request.taskId)) {
+          return false;
+        }
+
+        replacementAdapter = new OpenCodeAdapter(request.taskId);
+        managedTask.adapter = replacementAdapter;
+        managedTask.detachAdapterListeners = this.attachAdapterListeners(managedTask, replacementAdapter);
+
+        managedTask.config = {
+          ...managedTask.config,
+          taskId: request.taskId,
+          ...(previousSessionId ? { sessionId: previousSessionId } : {}),
+        };
+
+        await ensureDevBrowserServer(managedTask.callbacks.onProgress);
+        if (managedTask.isCleaningUp || !this.activeTasks.has(request.taskId)) {
+          return false;
+        }
+        await replacementAdapter.startTask(managedTask.config);
+        return true;
+      } catch (error) {
+        if (replacementAdapter) {
+          managedTask.detachAdapterListeners();
+          replacementAdapter.dispose();
+        }
+
+        managedTask.callbacks.onDebug?.({
+          type: 'mcp-restart-failed',
+          message: `MCP recovery restart failed for skill "${request.skill}"`,
+          data: {
+            skill: request.skill,
+            attempt: request.attempt,
+            reason: request.reason,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        });
+        return false;
+      } finally {
+        managedTask.recoveryInFlight = null;
+      }
+    })();
+
+    return managedTask.recoveryInFlight;
   }
 
   /**
@@ -456,6 +660,11 @@ export class TaskManager {
     // Check if it's a queued task
     const queueIndex = this.taskQueue.findIndex(q => q.taskId === taskId);
     if (queueIndex !== -1) {
+      const queuedTask = this.taskQueue[queueIndex];
+      this.emitRaceTelemetry(queuedTask?.callbacks, taskId, 'cancelled-queued-task-before-start', {
+        queuePosition: queueIndex + 1,
+        queueLength: this.taskQueue.length,
+      });
       console.log(`[TaskManager] Cancelling queued task ${taskId}`);
       this.taskQueue.splice(queueIndex, 1);
       return;
@@ -468,6 +677,21 @@ export class TaskManager {
       return;
     }
 
+    if (managedTask.startupPhase !== 'running') {
+      this.emitRaceTelemetry(managedTask.callbacks, taskId, 'cancel-requested-during-startup', {
+        startupPhase: managedTask.startupPhase,
+        activeTaskCount: this.activeTasks.size,
+        queueLength: this.taskQueue.length,
+      });
+    }
+
+    if (managedTask.isCleaningUp) {
+      this.emitRaceTelemetry(managedTask.callbacks, taskId, 'cancel-requested-during-cleanup', {
+        startupPhase: managedTask.startupPhase,
+      });
+    }
+
+    managedTask.cancelRequestedAtMs = Date.now();
     console.log(`[TaskManager] Cancelling running task ${taskId}`);
 
     try {
@@ -476,6 +700,17 @@ export class TaskManager {
       this.cleanupTask(taskId);
       // Process queue after cancellation
       this.processQueue();
+
+      const cancelLatencyMs =
+        managedTask.cancelRequestedAtMs === null
+          ? null
+          : Date.now() - managedTask.cancelRequestedAtMs;
+      this.emitRaceTelemetry(managedTask.callbacks, taskId, 'cancel-finished', {
+        startupPhase: managedTask.startupPhase,
+        cancelLatencyMs,
+        activeTaskCount: this.activeTasks.size,
+        queueLength: this.taskQueue.length,
+      });
     }
   }
 

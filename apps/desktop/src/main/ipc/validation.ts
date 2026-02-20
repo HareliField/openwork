@@ -26,6 +26,79 @@ export const resumeSessionSchema = z.object({
   chrome: z.boolean().optional(),
 });
 
+// API error response schema
+export const apiErrorResponseSchema = z.object({
+  error: z.object({
+    message: z.string().optional(),
+  }).optional(),
+}).passthrough();
+
+// Ollama tags response schema
+export const ollamaTagsResponseSchema = z.object({
+  models: z.array(z.object({
+    name: z.string(),
+    size: z.number(),
+  })).optional().default([]),
+}).passthrough();
+
+const desktopControlOverallStatusSchema = z.enum([
+  'ready',
+  'needs_screen_recording_permission',
+  'needs_accessibility_permission',
+  'mcp_unhealthy',
+  'unknown',
+]);
+
+const desktopControlCapabilitySchema = z.enum([
+  'screen_capture',
+  'action_execution',
+  'mcp_health',
+]);
+
+const desktopControlCheckStatusSchema = z.enum([
+  'ready',
+  'blocked',
+  'unknown',
+]);
+
+const desktopControlRemediationSchema = z.object({
+  title: z.string().min(1, 'Remediation title is required'),
+  steps: z.array(z.string().min(1)).min(1, 'At least one remediation step is required'),
+  systemSettingsPath: z.string().optional(),
+});
+
+const desktopControlCapabilityStatusSchema = z.object({
+  capability: desktopControlCapabilitySchema,
+  status: desktopControlCheckStatusSchema,
+  errorCode: z.string().nullable(),
+  message: z.string().min(1, 'Capability message is required'),
+  remediation: desktopControlRemediationSchema,
+  checkedAt: z.string().datetime(),
+  details: z.record(z.any()).optional(),
+});
+
+export const desktopControlStatusResponseSchema = z.object({
+  status: desktopControlOverallStatusSchema,
+  errorCode: z.string().nullable(),
+  message: z.string().min(1, 'Status message is required'),
+  remediation: desktopControlRemediationSchema,
+  checkedAt: z.string().datetime(),
+  cache: z.object({
+    ttlMs: z.number().int().positive(),
+    expiresAt: z.string().datetime(),
+    fromCache: z.boolean(),
+  }),
+  checks: z.object({
+    screen_capture: desktopControlCapabilityStatusSchema,
+    action_execution: desktopControlCapabilityStatusSchema,
+    mcp_health: desktopControlCapabilityStatusSchema,
+  }),
+});
+
+export const desktopControlStatusRequestSchema = z.object({
+  forceRefresh: z.boolean().optional(),
+});
+
 export function validate<TSchema extends z.ZodTypeAny>(
   schema: TSchema,
   payload: unknown

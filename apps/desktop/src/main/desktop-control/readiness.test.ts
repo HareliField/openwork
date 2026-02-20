@@ -8,12 +8,14 @@ interface SkillLayoutOptions {
   includeScreenCapture?: boolean;
   includeActionExecutor?: boolean;
   includeFilePermission?: boolean;
+  includeLiveScreenStream?: boolean;
 }
 
 function createSkillsDirectory(baseDir: string, options: SkillLayoutOptions = {}): string {
   const includeScreenCapture = options.includeScreenCapture ?? true;
   const includeActionExecutor = options.includeActionExecutor ?? true;
   const includeFilePermission = options.includeFilePermission ?? true;
+  const includeLiveScreenStream = options.includeLiveScreenStream ?? true;
   const skillsPath = path.join(baseDir, 'skills');
 
   const files: Array<{ enabled: boolean; filePath: string }> = [
@@ -28,6 +30,10 @@ function createSkillsDirectory(baseDir: string, options: SkillLayoutOptions = {}
     {
       enabled: includeFilePermission,
       filePath: path.join(skillsPath, 'file-permission', 'src', 'index.ts'),
+    },
+    {
+      enabled: includeLiveScreenStream,
+      filePath: path.join(skillsPath, 'live-screen-stream', 'src', 'index.ts'),
     },
   ];
 

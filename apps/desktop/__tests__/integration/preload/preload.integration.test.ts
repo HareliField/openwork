@@ -180,7 +180,7 @@ describe('Preload Script Integration', () => {
       });
 
       it('getApiKey should invoke api-key:get', async () => {
-        await (capturedAccomplishAPI.getApiKey as () => Promise<string | null>)();
+        await (capturedAccomplishAPI.getApiKey as () => Promise<{ exists: boolean; prefix?: string }>)();
         expect(mockInvoke).toHaveBeenCalledWith('api-key:get');
       });
 

@@ -39,6 +39,8 @@ export function StreamingText({
     // If new text is longer, continue streaming from current position
     if (text.length > textRef.current.length && !isComplete) {
       setIsStreaming(true);
+      // Reset lastTimeRef so the animation starts fresh from current timestamp
+      lastTimeRef.current = 0;
     }
     textRef.current = text;
   }, [text, isComplete]);
@@ -51,7 +53,11 @@ export function StreamingText({
     }
   }, [isComplete, text.length]);
 
-  // Animation loop
+  // Track whether streaming is still needed via ref to avoid stale closures in RAF
+  const isStreamingRef = useRef(isStreaming);
+  isStreamingRef.current = isStreaming;
+
+  // Animation loop - does NOT depend on displayedLength to avoid tearing down RAF every frame
   useEffect(() => {
     if (!isStreaming || isComplete) return;
 
@@ -66,18 +72,25 @@ export function StreamingText({
       const charsToAdd = Math.floor(elapsed * charsPerMs);
 
       if (charsToAdd > 0) {
+        let reachedEnd = false;
         setDisplayedLength((prev) => {
           const next = Math.min(prev + charsToAdd, textRef.current.length);
           if (next >= textRef.current.length) {
-            setIsStreaming(false);
-            onComplete?.();
+            reachedEnd = true;
           }
           return next;
         });
         lastTimeRef.current = timestamp;
+
+        if (reachedEnd) {
+          setIsStreaming(false);
+          onComplete?.();
+          return; // Stop the animation loop
+        }
       }
 
-      if (displayedLength < textRef.current.length) {
+      // Continue animation if still streaming
+      if (isStreamingRef.current) {
         rafRef.current = requestAnimationFrame(animate);
       }
     };
@@ -89,7 +102,7 @@ export function StreamingText({
         cancelAnimationFrame(rafRef.current);
       }
     };
-  }, [isStreaming, isComplete, speed, onComplete, displayedLength]);
+  }, [isStreaming, isComplete, speed, onComplete]);
 
   const displayedText = text.slice(0, displayedLength);
 

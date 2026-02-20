@@ -168,16 +168,23 @@ export class OpenCodeAdapter extends EventEmitter<OpenCodeAdapterEvents> {
       console.log('[OpenCode CLI]', shellMsg);
       this.emit('debug', { type: 'info', message: shellMsg });
 
-      this.ptyProcess = pty.spawn(shellCmd, shellArgs, {
-        name: 'xterm-256color',
-        cols: 200,
-        rows: 30,
-        cwd: safeCwd,
-        env: env as { [key: string]: string },
-      });
-      const pidMsg = `PTY Process PID: ${this.ptyProcess.pid}`;
-      console.log('[OpenCode CLI]', pidMsg);
-      this.emit('debug', { type: 'info', message: pidMsg });
+      try {
+        this.ptyProcess = pty.spawn(shellCmd, shellArgs, {
+          name: 'xterm-256color',
+          cols: 200,
+          rows: 30,
+          cwd: safeCwd,
+          env: env as { [key: string]: string },
+        });
+        const pidMsg = `PTY Process PID: ${this.ptyProcess.pid}`;
+        console.log('[OpenCode CLI]', pidMsg);
+        this.emit('debug', { type: 'info', message: pidMsg });
+      } catch (ptyError) {
+        const errorMsg = `Failed to spawn PTY: ${ptyError instanceof Error ? ptyError.message : String(ptyError)}`;
+        console.error('[OpenCode CLI]', errorMsg);
+        this.emit('debug', { type: 'error', message: errorMsg });
+        throw new Error(errorMsg);
+      }
 
       // Handle PTY data (combines stdout/stderr)
       this.ptyProcess.onData((data: string) => {
@@ -199,7 +206,7 @@ export class OpenCodeAdapter extends EventEmitter<OpenCodeAdapterEvents> {
         const exitMsg = `PTY Process exited with code: ${exitCode}, signal: ${signal}`;
         console.log('[OpenCode CLI]', exitMsg);
         this.emit('debug', { type: 'exit', message: exitMsg, data: { exitCode, signal } });
-        this.handleProcessExit(exitCode);
+        this.handleProcessExit(exitCode, signal);
       });
     }
 
@@ -358,24 +365,32 @@ export class OpenCodeAdapter extends EventEmitter<OpenCodeAdapterEvents> {
       }
     }
 
-    // Load all API keys
+    // Load all API keys from secure storage
     const apiKeys = await getAllApiKeys();
 
-    if (apiKeys.anthropic) {
-      env.ANTHROPIC_API_KEY = apiKeys.anthropic;
-      console.log('[OpenCode CLI] Using Anthropic API key from settings');
+    // Use secure storage keys, fallback to process.env if not in storage
+    if (apiKeys.anthropic || process.env.ANTHROPIC_API_KEY) {
+      env.ANTHROPIC_API_KEY = apiKeys.anthropic || process.env.ANTHROPIC_API_KEY;
+      console.log('[OpenCode CLI] Using Anthropic API key', apiKeys.anthropic ? 'from settings' : 'from environment');
     }
-    if (apiKeys.openai) {
-      env.OPENAI_API_KEY = apiKeys.openai;
-      console.log('[OpenCode CLI] Using OpenAI API key from settings');
+    if (apiKeys.openai || process.env.OPENAI_API_KEY) {
+      env.OPENAI_API_KEY = apiKeys.openai || process.env.OPENAI_API_KEY;
+      console.log('[OpenCode CLI] Using OpenAI API key', apiKeys.openai ? 'from settings' : 'from environment');
     }
-    if (apiKeys.google) {
-      env.GOOGLE_GENERATIVE_AI_API_KEY = apiKeys.google;
-      console.log('[OpenCode CLI] Using Google API key from settings');
+    if (apiKeys.google || process.env.GOOGLE_GENERATIVE_AI_API_KEY) {
+      env.GOOGLE_GENERATIVE_AI_API_KEY = apiKeys.google || process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+      console.log('[OpenCode CLI] Using Google API key', apiKeys.google ? 'from settings' : 'from environment');
     }
-    if (apiKeys.xai) {
-      env.XAI_API_KEY = apiKeys.xai;
-      console.log('[OpenCode CLI] Using xAI API key from settings');
+    if (apiKeys.xai || process.env.XAI_API_KEY) {
+      env.XAI_API_KEY = apiKeys.xai || process.env.XAI_API_KEY;
+      console.log('[OpenCode CLI] Using xAI API key', apiKeys.xai ? 'from settings' : 'from environment');
+    }
+    if (apiKeys.openrouter || process.env.OPENROUTER_API_KEY) {
+      env.OPENROUTER_API_KEY = apiKeys.openrouter || process.env.OPENROUTER_API_KEY;
+      console.log(
+        '[OpenCode CLI] Using OpenRouter API key',
+        apiKeys.openrouter ? 'from settings' : 'from environment'
+      );
     }
 
     // Set Ollama host if configured
@@ -404,20 +419,14 @@ export class OpenCodeAdapter extends EventEmitter<OpenCodeAdapterEvents> {
   }
 
   private async buildCliArgs(config: TaskConfig): Promise<string[]> {
-    // Get selected model from settings
-    const selectedModel = getSelectedModel();
-
     // OpenCode CLI uses: opencode run "message" --format json
+    // Let the CLI pick the model based on available API keys in the environment
+    // Passing --model with our custom format causes errors
     const args = [
       'run',
       config.prompt,
       '--format', 'json',
     ];
-
-    // Add model selection if specified
-    if (selectedModel?.model) {
-      args.push('--model', selectedModel.model);
-    }
 
     // Resume session if specified
     if (config.sessionId) {
@@ -607,10 +616,14 @@ export class OpenCodeAdapter extends EventEmitter<OpenCodeAdapterEvents> {
     this.emit('permission-request', permissionRequest);
   }
 
-  private handleProcessExit(code: number | null): void {
+  private handleProcessExit(code: number | null, signal?: number): void {
+    // Flush any remaining data in the stream parser buffer before handling exit.
+    // The last line of CLI output may not end with \n, so it stays in the buffer.
+    this.streamParser.flush();
+
     // Only emit complete/error if we haven't already received a result message
     if (!this.hasCompleted) {
-      if (this.wasInterrupted && code === 0) {
+      if (this.wasInterrupted && (code === 0 || signal === 2)) {
         // User interrupted the task - emit interrupted status so they can continue
         console.log('[OpenCode CLI] Task was interrupted by user');
         this.emit('complete', {
@@ -623,9 +636,15 @@ export class OpenCodeAdapter extends EventEmitter<OpenCodeAdapterEvents> {
           status: 'success',
           sessionId: this.currentSessionId || undefined,
         });
-      } else if (code !== null) {
-        // Error exit
-        this.emit('error', new Error(`OpenCode CLI exited with code ${code}`));
+      } else {
+        // Error exit, including signal-only exits where code can be null.
+        if (code !== null && code !== undefined) {
+          this.emit('error', new Error(`OpenCode CLI exited with code ${code}`));
+        } else if (signal !== undefined) {
+          this.emit('error', new Error(`OpenCode CLI exited due to signal ${signal}`));
+        } else {
+          this.emit('error', new Error('OpenCode CLI exited unexpectedly'));
+        }
       }
     }
 
@@ -729,4 +748,3 @@ export function getOpenCodeAdapter(): OpenCodeAdapter {
   }
   return adapterInstance;
 }
-

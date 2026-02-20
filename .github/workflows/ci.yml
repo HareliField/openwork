@@ -90,6 +90,29 @@ jobs:
           path: apps/desktop/coverage/
           retention-days: 7
 
+  packaged-path-assumptions:
+    name: Packaged Path Assumptions
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify packaged app path assumptions
+        run: pnpm -F @accomplish/desktop test:packaged-paths
+
   # Type checking
   typecheck:
     name: Type Check
@@ -192,18 +215,8 @@ jobs:
       - name: Install Playwright browsers
         run: pnpm -F @accomplish/desktop exec playwright install --with-deps
 
-      - name: Build desktop app
-        run: pnpm -F @accomplish/desktop build
-
-      - name: Run preload + IPC startup healthcheck
-        run: pnpm --dir apps/desktop exec node ../../scripts/desktop-control-healthcheck/startup-healthcheck.mjs
-        env:
-          E2E_SKIP_AUTH: '1'
-          E2E_MOCK_TASK_EVENTS: '1'
-          CI: true
-
-      - name: Run renderer bridge E2E guard
-        run: pnpm --dir apps/desktop exec playwright test --config ../../tests/desktop-control/playwright.config.ts
+      - name: Run desktop-control diagnostics
+        run: pnpm diagnostics:desktop-control
         env:
           E2E_SKIP_AUTH: '1'
           E2E_MOCK_TASK_EVENTS: '1'

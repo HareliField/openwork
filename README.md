@@ -188,6 +188,22 @@ That's it.
 </details>
 
 <details>
+<summary><strong>Desktop Control Rollout</strong></summary>
+
+- Rollout phases, gates, rollback conditions, and support runbook:
+  [`docs/plans/2026-02-13-desktop-control-rollout.md`](docs/plans/2026-02-13-desktop-control-rollout.md)
+
+</details>
+
+<details>
+<summary><strong>Weekly Progress Summary Template</strong></summary>
+
+- Weekly cross-area status template (Areas 1-7):
+  [`docs/plans/2026-02-19-weekly-progress-summary-template.md`](docs/plans/2026-02-19-weekly-progress-summary-template.md)
+
+</details>
+
+<details>
 <summary><strong>Architecture</strong></summary>
 
 ```
@@ -219,6 +235,20 @@ git checkout -b feature/amazing-feature
 git commit -m 'Add amazing feature'
 git push origin feature/amazing-feature
 ```
+
+### Parallel Multi-Agent Workflow
+
+When multiple contributors (or agents) are working at the same time, use
+`docs/agent-parallel-worklist.md` as the source of truth.
+
+1. Pick the next unclaimed item in numeric order.
+2. Follow the area ownership rules and only edit paths listed for your area.
+3. Keep scope to one worklist item per PR.
+4. Do not edit another area's files unless the item explicitly requires it.
+5. Include the worklist item number in your PR title/body for traceability.
+6. Before opening your PR, rebase on the latest main branch and run relevant checks.
+
+This keeps parallel changes reviewable and reduces merge conflicts.
 
 <br />
 

@@ -58,6 +58,8 @@ vi.mock('os', () => ({
 
 // Create a mock adapter class
 class MockOpenCodeAdapter extends EventEmitter {
+  static startDelayMs = 0;
+
   private taskId: string | null = null;
   private sessionId: string | null = null;
   private disposed = false;
@@ -66,6 +68,7 @@ class MockOpenCodeAdapter extends EventEmitter {
   constructor(taskId?: string) {
     super();
     this.taskId = taskId || null;
+    createdAdapters.push(this);
     this.startTaskFn = vi.fn(async (config: TaskConfig) => {
       this.taskId = config.taskId || `task_${Date.now()}`;
       this.sessionId = `session_${Date.now()}`;
@@ -92,6 +95,9 @@ class MockOpenCodeAdapter extends EventEmitter {
   }
 
   async startTask(config: TaskConfig) {
+    if (MockOpenCodeAdapter.startDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, MockOpenCodeAdapter.startDelayMs));
+    }
     return this.startTaskFn(config);
   }
 
@@ -195,10 +201,19 @@ describe('Task Manager Module', () => {
     };
   }
 
+  function getRaceTelemetryEvents(callbacks: ReturnType<typeof createMockCallbacks>): string[] {
+    return callbacks.onDebug.mock.calls
+      .map((call: unknown[]) => call[0] as { type?: string; data?: { event?: string } })
+      .filter((log) => log?.type === 'task-race-telemetry')
+      .map((log) => log.data?.event)
+      .filter((event): event is string => typeof event === 'string');
+  }
+
   beforeEach(async () => {
     vi.clearAllMocks();
     vi.resetModules();
     createdAdapters.length = 0;
+    MockOpenCodeAdapter.startDelayMs = 0;
 
     // Re-import module to get fresh state
     const module = await import('@main/opencode/task-manager');
@@ -396,6 +411,25 @@ describe('Task Manager Module', () => {
     });
 
     describe('cancelTask()', () => {
+      it('should emit telemetry when cancel is requested during startup', async () => {
+        // Arrange
+        MockOpenCodeAdapter.startDelayMs = 40;
+        const manager = new TaskManager();
+        const callbacks = createMockCallbacks();
+
+        await manager.startTask('task-1', { prompt: 'Test' }, callbacks);
+
+        // Act
+        await manager.cancelTask('task-1');
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        // Assert
+        const events = getRaceTelemetryEvents(callbacks);
+        expect(events).toContain('cancel-requested-during-startup');
+        expect(events).toContain('start-aborted-before-cli-launch');
+        expect(events).toContain('cancel-finished');
+      });
+
       it('should cancel a running task', async () => {
         // Arrange
         const manager = new TaskManager();
@@ -413,7 +447,8 @@ describe('Task Manager Module', () => {
         // Arrange
         const manager = new TaskManager({ maxConcurrentTasks: 1 });
         await manager.startTask('task-1', { prompt: 'Task 1' }, createMockCallbacks());
-        await manager.startTask('task-2', { prompt: 'Task 2' }, createMockCallbacks());
+        const queuedCallbacks = createMockCallbacks();
+        await manager.startTask('task-2', { prompt: 'Task 2' }, queuedCallbacks);
 
         expect(manager.isTaskQueued('task-2')).toBe(true);
 
@@ -423,6 +458,9 @@ describe('Task Manager Module', () => {
         // Assert
         expect(manager.isTaskQueued('task-2')).toBe(false);
         expect(manager.getQueueLength()).toBe(0);
+        expect(getRaceTelemetryEvents(queuedCallbacks)).toContain(
+          'cancelled-queued-task-before-start'
+        );
       });
 
       it('should handle cancellation of non-existent task gracefully', async () => {

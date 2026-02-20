@@ -36,6 +36,38 @@ import {
   PERMISSION_API_PORT,
 } from '@main/permission-api';
 
+async function waitForServerListening(server: import('http').Server): Promise<void> {
+  if (server.listening) {
+    return;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    server.once('listening', () => resolve());
+    server.once('error', reject);
+  });
+}
+
+async function closeServer(server: import('http').Server): Promise<void> {
+  await new Promise<void>((resolve) => {
+    server.close(() => resolve());
+  });
+}
+
+async function startTestServer(): Promise<{ server: import('http').Server; baseUrl: string }> {
+  const server = startPermissionApiServer(0);
+  await waitForServerListening(server);
+
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('Permission API test server did not bind to a TCP port');
+  }
+
+  return {
+    server,
+    baseUrl: `http://127.0.0.1:${address.port}`,
+  };
+}
+
 describe('Permission API Integration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -110,11 +142,52 @@ describe('Permission API Integration', () => {
       expect(typeof startPermissionApiServer).toBe('function');
     });
 
-    it('should return an HTTP server when called', () => {
-      const server = startPermissionApiServer();
-      expect(server).toBeDefined();
-      // Clean up - close the server
-      server?.close();
+    it('should return an HTTP server when called', async () => {
+      const server = startPermissionApiServer(0);
+      try {
+        await waitForServerListening(server);
+        expect(server).toBeDefined();
+      } finally {
+        await closeServer(server);
+      }
+    });
+
+    it('should reject browser requests with non-allowlisted Origin headers', async () => {
+      const { server, baseUrl } = await startTestServer();
+
+      try {
+        const response = await fetch(`${baseUrl}/permission`, {
+          method: 'OPTIONS',
+          headers: {
+            Origin: 'https://evil.example',
+            'Access-Control-Request-Method': 'POST',
+          },
+        });
+
+        expect(response.status).toBe(403);
+        await expect(response.json()).resolves.toEqual({ error: 'Origin not allowed' });
+      } finally {
+        await closeServer(server);
+      }
+    });
+
+    it('should continue handling local requests without Origin headers', async () => {
+      const { server, baseUrl } = await startTestServer();
+
+      try {
+        const response = await fetch(`${baseUrl}/permission`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+
+        expect(response.status).toBe(400);
+        await expect(response.json()).resolves.toEqual({
+          error: 'operation and filePath are required',
+        });
+      } finally {
+        await closeServer(server);
+      }
     });
   });
 });

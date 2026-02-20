@@ -1,26 +1,22 @@
 import { config } from 'dotenv';
-import { app, BrowserWindow, shell, ipcMain, nativeImage, session, desktopCapturer } from 'electron';
+import { app, BrowserWindow, shell, ipcMain, nativeImage, session, desktopCapturer, screen } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { registerIPCHandlers } from './ipc/handlers';
-import { flushPendingTasks } from './store/taskHistory';
 import { disposeTaskManager } from './opencode/task-manager';
 import { checkAndCleanupFreshInstall } from './store/freshInstallCleanup';
+import { initializeSmartTrigger, disposeSmartTrigger } from './smart-trigger';
+import { storeApiKey, getApiKey } from './store/secureStorage';
 
-// Local UI - no longer uses remote URL
-
-// Early E2E flag detection - check command-line args before anything else
-// This must run synchronously at module load time
-if (process.argv.includes('--e2e-skip-auth')) {
-  (global as Record<string, unknown>).E2E_SKIP_AUTH = true;
-}
-if (process.argv.includes('--e2e-mock-tasks') || process.env.E2E_MOCK_TASK_EVENTS === '1') {
-  (global as Record<string, unknown>).E2E_MOCK_TASK_EVENTS = true;
-}
+process.on('uncaughtException', (error) => {
+  console.error('[Main] Uncaught exception:', error);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[Main] Unhandled rejection:', reason);
+});
 
 // Clean mode - wipe all stored data for a fresh start
-// Use CLEAN_START env var since CLI args don't pass through vite to Electron
 if (process.env.CLEAN_START === '1') {
   const userDataPath = app.getPath('userData');
   console.log('[Clean Mode] Clearing userData directory:', userDataPath);
@@ -32,12 +28,10 @@ if (process.env.CLEAN_START === '1') {
   } catch (err) {
     console.error('[Clean Mode] Failed to clear userData:', err);
   }
-  // Note: Secure storage (API keys, auth tokens) is stored in electron-store
-  // which lives in userData, so it gets cleared with the directory above
 }
 
-// Set app name before anything else (affects deep link dialogs)
-app.name = 'Openwork';
+// Set app name
+app.name = 'Screen Agent';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -47,15 +41,43 @@ const envPath = app.isPackaged
   : path.join(__dirname, '../../.env');
 config({ path: envPath });
 
-// The built directory structure
-//
-// ├─┬ dist-electron
-// │ ├─┬ main
-// │ │ └── index.js    > Electron-Main
-// │ └─┬ preload
-// │   └── index.js    > Preload-Scripts
-// ├─┬ dist
-// │ └── index.html    > Electron-Renderer
+// Auto-load API keys from .env into secure storage (if not already stored)
+// This allows users to set API keys via .env file
+if (process.env.GOOGLE_GENERATIVE_AI_API_KEY) {
+  const existingKey = getApiKey('google');
+  if (!existingKey) {
+    storeApiKey('google', process.env.GOOGLE_GENERATIVE_AI_API_KEY);
+    console.log('[Main] Loaded Google AI API key from .env file');
+  }
+}
+if (process.env.ANTHROPIC_API_KEY) {
+  const existingKey = getApiKey('anthropic');
+  if (!existingKey) {
+    storeApiKey('anthropic', process.env.ANTHROPIC_API_KEY);
+    console.log('[Main] Loaded Anthropic API key from .env file');
+  }
+}
+if (process.env.OPENAI_API_KEY) {
+  const existingKey = getApiKey('openai');
+  if (!existingKey) {
+    storeApiKey('openai', process.env.OPENAI_API_KEY);
+    console.log('[Main] Loaded OpenAI API key from .env file');
+  }
+}
+if (process.env.XAI_API_KEY) {
+  const existingKey = getApiKey('xai');
+  if (!existingKey) {
+    storeApiKey('xai', process.env.XAI_API_KEY);
+    console.log('[Main] Loaded xAI API key from .env file');
+  }
+}
+if (process.env.OPENROUTER_API_KEY) {
+  const existingKey = getApiKey('openrouter');
+  if (!existingKey) {
+    storeApiKey('openrouter', process.env.OPENROUTER_API_KEY);
+    console.log('[Main] Loaded OpenRouter API key from .env file');
+  }
+}
 
 process.env.APP_ROOT = path.join(__dirname, '../..');
 
@@ -64,6 +86,34 @@ export const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist');
 export const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL;
 
 let mainWindow: BrowserWindow | null = null;
+function getActiveMainWindow(): BrowserWindow | null {
+  if (
+    !mainWindow ||
+    mainWindow.isDestroyed() ||
+    mainWindow.webContents.isDestroyed()
+  ) {
+    return null;
+  }
+  return mainWindow;
+}
+
+function withActiveMainWindow(
+  action: (window: BrowserWindow) => void,
+  onUnavailable?: () => void
+): void {
+  const activeWindow = getActiveMainWindow();
+  if (!activeWindow) {
+    onUnavailable?.();
+    return;
+  }
+
+  try {
+    action(activeWindow);
+  } catch (error) {
+    console.warn('[Main] Window action skipped because window is unavailable', error);
+    onUnavailable?.();
+  }
+}
 
 // Get the preload script path
 function getPreloadPath(): string {
@@ -71,7 +121,7 @@ function getPreloadPath(): string {
 }
 
 function createWindow() {
-  console.log('[Main] Creating main application window');
+  console.log('[Main] Creating Screen Agent window');
 
   // Get app icon
   const iconPath = app.isPackaged
@@ -82,70 +132,111 @@ function createWindow() {
   const preloadPath = getPreloadPath();
   console.log('[Main] Using preload script:', preloadPath);
 
-  mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 800,
-    minWidth: 900,
-    minHeight: 600,
-    title: 'Openwork',
+  // Get screen dimensions to position the floating window
+  const primaryDisplay = screen.getPrimaryDisplay();
+  const { width: screenWidth, height: screenHeight } = primaryDisplay.workAreaSize;
+
+  // Floating window dimensions
+  const windowWidth = 460;
+  const windowHeight = 680;
+
+  // Position in bottom-right corner with some padding
+  const x = screenWidth - windowWidth - 20;
+  const y = screenHeight - windowHeight - 20;
+
+  const createdWindow = new BrowserWindow({
+    width: windowWidth,
+    height: windowHeight,
+    x,
+    y,
+    minWidth: 380,
+    minHeight: 500,
+    maxWidth: 600,
+    maxHeight: 900,
+    title: 'Screen Agent',
     icon: icon.isEmpty() ? undefined : icon,
-    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
-    trafficLightPosition: { x: 16, y: 16 },
+    // Floating window style
+    frame: false, // No native title bar
+    transparent: true, // Allow transparent background
+    vibrancy: 'under-window', // macOS blur effect
+    visualEffectState: 'active',
+    hasShadow: true,
+    alwaysOnTop: false, // User can toggle this
+    skipTaskbar: false,
+    resizable: true,
+    movable: true,
+    // macOS specific
+    titleBarStyle: 'hidden',
+    trafficLightPosition: { x: -100, y: -100 }, // Hide traffic lights
     webPreferences: {
       preload: preloadPath,
       nodeIntegration: false,
       contextIsolation: true,
     },
   });
+  mainWindow = createdWindow;
+  createdWindow.on('closed', () => {
+    if (mainWindow === createdWindow) {
+      mainWindow = null;
+    }
+  });
 
   // Open external links in browser
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+  createdWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('https:') || url.startsWith('http:')) {
       shell.openExternal(url);
     }
     return { action: 'deny' };
   });
 
-  // Maximize window by default
-  mainWindow.maximize();
-
-  // Open DevTools in dev mode (non-packaged), but not during E2E tests
-  const isE2EMode = (global as Record<string, unknown>).E2E_SKIP_AUTH === true;
-  if (!app.isPackaged && !isE2EMode) {
-    mainWindow.webContents.openDevTools({ mode: 'right' });
+  // Open DevTools in dev mode (non-packaged)
+  if (!app.isPackaged) {
+    // Use detached devtools for floating window
+    createdWindow.webContents.openDevTools({ mode: 'detach' });
   }
 
   // Load the local UI
   if (VITE_DEV_SERVER_URL) {
     console.log('[Main] Loading from Vite dev server:', VITE_DEV_SERVER_URL);
-    mainWindow.loadURL(VITE_DEV_SERVER_URL);
+    createdWindow.loadURL(VITE_DEV_SERVER_URL);
   } else {
     const indexPath = path.join(RENDERER_DIST, 'index.html');
     console.log('[Main] Loading from file:', indexPath);
-    mainWindow.loadFile(indexPath);
+    createdWindow.loadFile(indexPath);
   }
 }
 
-// Single instance lock
-const gotTheLock = app.requestSingleInstanceLock();
+// Use single-instance lock only for packaged apps.
+// In dev we allow running alongside an installed build.
+const shouldUseSingleInstanceLock = app.isPackaged;
+const gotTheLock = shouldUseSingleInstanceLock
+  ? app.requestSingleInstanceLock()
+  : true;
 
-if (!gotTheLock) {
+if (shouldUseSingleInstanceLock && !gotTheLock) {
   console.log('[Main] Second instance attempted; quitting');
   app.quit();
 } else {
-  app.on('second-instance', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-      console.log('[Main] Focused existing instance after second-instance event');
-    }
-  });
+  if (shouldUseSingleInstanceLock) {
+    app.on('second-instance', () => {
+      withActiveMainWindow((activeWindow) => {
+        if (activeWindow.isMinimized()) activeWindow.restore();
+        activeWindow.show();
+        activeWindow.focus();
+        console.log('[Main] Focused existing instance after second-instance event');
+      }, () => {
+        if (app.isReady()) {
+          createWindow();
+          console.log('[Main] Recreated window after second-instance event');
+        }
+      });
+    });
+  }
 
   app.whenReady().then(async () => {
     console.log('[Main] Electron app ready, version:', app.getVersion());
 
-    // Check for fresh install and cleanup old data BEFORE initializing stores
-    // This ensures users get a clean slate after reinstalling from DMG
+    // Check for fresh install and cleanup old data
     try {
       const didCleanup = await checkAndCleanupFreshInstall();
       if (didCleanup) {
@@ -199,11 +290,20 @@ if (!gotTheLock) {
 
     createWindow();
 
+    // Initialize smart trigger service after window is created
+    const activeWindow = getActiveMainWindow();
+    if (activeWindow) {
+      initializeSmartTrigger(activeWindow);
+    }
+
     app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) {
+      withActiveMainWindow((active) => {
+        active.show();
+        active.focus();
+      }, () => {
         createWindow();
         console.log('[Main] Application reactivated; recreated window');
-      }
+      });
     });
   });
 }
@@ -215,31 +315,59 @@ app.on('window-all-closed', () => {
   }
 });
 
-// Flush pending task history writes and dispose TaskManager before quitting
+// Dispose TaskManager and SmartTrigger before quitting
 app.on('before-quit', () => {
   console.log('[Main] App before-quit event fired');
-  flushPendingTasks();
-  // Dispose all active tasks and cleanup PTY processes
   disposeTaskManager();
+  disposeSmartTrigger();
 });
 
-// Handle custom protocol (accomplish://)
-app.setAsDefaultProtocolClient('accomplish');
+// Handle custom protocol
+app.setAsDefaultProtocolClient('screenagent');
 
 app.on('open-url', (event, url) => {
   event.preventDefault();
   console.log('[Main] Received protocol URL:', url);
-  // Handle protocol URL
-  if (url.startsWith('accomplish://callback')) {
-    mainWindow?.webContents?.send('auth:callback', url);
+  if (url.startsWith('screenagent://callback')) {
+    withActiveMainWindow((activeWindow) => {
+      activeWindow.webContents.send('auth:callback', url);
+    }, () => {
+      console.warn('[Main] Ignoring auth callback because no active window is available');
+    });
   }
 });
 
-// IPC Handlers
+// IPC Handlers for window control
 ipcMain.handle('app:version', () => {
   return app.getVersion();
 });
 
 ipcMain.handle('app:platform', () => {
   return process.platform;
+});
+
+// Toggle always on top
+ipcMain.handle('window:toggle-always-on-top', () => {
+  const activeWindow = getActiveMainWindow();
+  if (activeWindow) {
+    const isOnTop = activeWindow.isAlwaysOnTop();
+    activeWindow.setAlwaysOnTop(!isOnTop);
+    return !isOnTop;
+  }
+  return false;
+});
+
+// Minimize window
+ipcMain.handle('window:minimize', () => {
+  const activeWindow = getActiveMainWindow();
+  activeWindow?.minimize();
+});
+
+// Show window
+ipcMain.handle('window:show', () => {
+  const activeWindow = getActiveMainWindow();
+  if (activeWindow) {
+    activeWindow.show();
+    activeWindow.focus();
+  }
 });

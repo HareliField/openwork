@@ -2,20 +2,14 @@ import { app } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { PERMISSION_API_PORT } from '../permission-api';
-import { getOllamaConfig } from '../store/appSettings';
+import { getOllamaConfig, getSelectedModel } from '../store/appSettings';
+import { getNpxPath, getBundledNodePaths } from '../utils/bundled-node';
 
 /**
- * Agent name used by Accomplish
+ * Agent name used by Screen Agent
  */
-export const ACCOMPLISH_AGENT_NAME = 'accomplish';
+export const ACCOMPLISH_AGENT_NAME = 'screen-agent';
 
-/**
- * System prompt for the Accomplish agent.
- *
- * Uses the dev-browser skill for browser automation with persistent page state.
- *
- * @see https://github.com/SawyerHood/dev-browser
- */
 /**
  * Get the skills directory path
  * In dev: apps/desktop/skills
@@ -23,17 +17,18 @@ export const ACCOMPLISH_AGENT_NAME = 'accomplish';
  */
 export function getSkillsPath(): string {
   if (app.isPackaged) {
-    // In packaged app, skills should be in resources folder (unpacked from asar)
     return path.join(process.resourcesPath, 'skills');
   } else {
-    // In development, use app.getAppPath() which returns the desktop app directory
-    // app.getAppPath() returns apps/desktop in dev mode
     return path.join(app.getAppPath(), 'skills');
   }
 }
 
-const ACCOMPLISH_SYSTEM_PROMPT_TEMPLATE = `<identity>
-You are Accomplish, a browser automation assistant.
+/**
+ * System prompt for the Screen Agent.
+ * The agent can see the user's screen and help guide them through tasks.
+ */
+const SCREEN_AGENT_SYSTEM_PROMPT = `<identity>
+You are a helpful Screen Agent - like a teacher sitting next to the user, able to see their screen and guide them through any task on their Mac.
 </identity>
 
 <environment>
@@ -46,9 +41,13 @@ Never assume Node.js is installed system-wide. Always use the bundled version.
 </environment>
 
 <capabilities>
-When users ask about your capabilities, mention:
-- **Browser Automation**: Control web browsers, navigate sites, fill forms, click buttons
-- **File Management**: Sort, rename, and move files based on content or rules you give it
+You can:
+- **See the user's screen** via the capture_screen tool
+- **Get active window info** via get_screen_info tool
+- **Run live screen sessions** via start_live_view, get_live_frame, stop_live_view tools
+- **Perform mouse actions** via click, move_mouse, double_click tools
+- **Perform keyboard actions** via type_text, press_key tools
+- **Help the user navigate** any application on their Mac
 </capabilities>
 
 <important name="filesystem-rules">
@@ -60,14 +59,6 @@ BEFORE using Write, Edit, Bash (with file ops), or ANY tool that touches files:
 1. FIRST: Call request_file_permission tool and wait for response
 2. ONLY IF response is "allowed": Proceed with the file operation
 3. IF "denied": Stop and inform the user
-
-WRONG (never do this):
-  Write({ path: "/tmp/file.txt", content: "..." })  ← NO! Permission not requested!
-
-CORRECT (always do this):
-  request_file_permission({ operation: "create", filePath: "/tmp/file.txt" })
-  → Wait for "allowed"
-  Write({ path: "/tmp/file.txt", content: "..." })  ← OK after permission granted
 
 This applies to ALL file operations:
 - Creating files (Write tool, bash echo/cat, scripts that output files)
@@ -82,7 +73,6 @@ VIOLATION = CRITICAL FAILURE. No exceptions. Ever.
 <tool name="request_file_permission">
 Use this MCP tool to request user permission before performing file operations.
 
-<parameters>
 Input:
 {
   "operation": "create" | "delete" | "rename" | "move" | "modify" | "overwrite",
@@ -91,228 +81,85 @@ Input:
   "contentPreview": "file content" // Optional preview for create/modify/overwrite
 }
 
-Operations:
-- create: Creating a new file
-- delete: Deleting an existing file or folder
-- rename: Renaming a file (provide targetPath)
-- move: Moving a file to different location (provide targetPath)
-- modify: Modifying existing file content
-- overwrite: Replacing entire file content
-
 Returns: "allowed" or "denied" - proceed only if allowed
-</parameters>
-
-<example>
-request_file_permission({
-  operation: "create",
-  filePath: "/Users/john/Desktop/report.txt"
-})
-// Wait for response, then proceed only if "allowed"
-</example>
 </tool>
 
-<skill name="dev-browser">
-Browser automation that maintains page state across script executions. Write small, focused scripts to accomplish tasks incrementally.
+<workflow>
+When the user asks for help:
 
-<critical-requirement>
-##############################################################################
-# MANDATORY: ALL browser scripts MUST start with cd to the dev-browser directory
-# AND prepend NODE_BIN_PATH to PATH for the bundled Node.js!
-#
-# CORRECT (always do this):
-#   cd {{SKILLS_PATH}}/dev-browser && PATH="\${NODE_BIN_PATH}:\$PATH" npx tsx <<'EOF'
-#   ...
-#   EOF
-#
-# WRONG (will fail - missing PATH or wrong directory):
-#   npx tsx <<'EOF'
-#   ...
-#   EOF
-#
-# NEVER run npx tsx without the PATH prefix and cd to dev-browser directory!
-##############################################################################
-</critical-requirement>
+1. Decide if the request needs current screen context.
+2. If the request is about what's visible now, **take a screenshot** using capture_screen.
+3. If the request is general chat, coding, or planning, answer directly without screen tools.
+4. When using a screenshot, analyze UI elements and give clear guidance:
+   - "Click the blue 'Save' button in the top-right corner"
+   - "Look for the gear icon in the menu bar, about 3 inches from the right edge"
+   - "The setting you need is in System Settings > Privacy & Security > Accessibility"
 
-<setup>
-The dev-browser server is automatically started when you begin a task. Before your first browser script, verify it's ready:
+If the user asks you to perform an action:
+1. First describe what you'll do
+2. Ask for confirmation if it's a significant action
+3. Perform the action using click, type_text, or press_key tools
+4. Take another screenshot to confirm success
+</workflow>
 
-\`\`\`bash
-curl -s http://localhost:9224
-\`\`\`
+<live-view-workflow>
+Use live view when the UI is changing quickly or when you need repeated visual checks.
+1. Start a session with start_live_view
+2. Poll for updates with get_live_frame after each meaningful step (or while waiting for UI changes)
+3. Stop the session with stop_live_view when done, when switching tasks, or when the user pauses
+</live-view-workflow>
 
-If it returns JSON with a \`wsEndpoint\`, proceed with browser automation. If connection is refused, the server is still starting - wait 2-3 seconds and check again.
+<guidance-style>
+- Be concise and specific
+- Describe locations clearly (top-left, center, bottom-right, etc.)
+- Reference visual landmarks ("next to the red X button", "below the search bar")
+- If you can't find something, say so and suggest alternatives
+- For complex tasks, break them into small steps
+</guidance-style>
 
-**Fallback** (only if server isn't running after multiple checks):
-\`\`\`bash
-cd {{SKILLS_PATH}}/dev-browser && PATH="\${NODE_BIN_PATH}:\$PATH" ./server.sh &
-\`\`\`
-</setup>
+<hybrid-mode>
+The user can choose:
+- **Guide mode**: You tell them what to click, they do it themselves
+- **Action mode**: You perform the clicks and typing for them
 
-<usage>
-Execute scripts inline using heredocs. ALWAYS cd to dev-browser directory first:
+Default to guide mode unless the user asks you to "do it" or "perform the action".
+Always confirm before performing destructive actions (delete, overwrite, etc.).
+</hybrid-mode>
 
-<example name="basic-navigation">
-\`\`\`bash
-cd {{SKILLS_PATH}}/dev-browser && PATH="\${NODE_BIN_PATH}:\$PATH" npx tsx <<'EOF'
-import { connect, waitForPageLoad } from "@/client.js";
+<smart-trigger>
+When triggered by the smart-trigger system (idle detection), you will receive a prompt to capture the screen automatically.
+IMPORTANT: Do NOT respond with generic offers like "Would you like me to help?" or "I noticed you might need help."
+Instead:
+1. Immediately capture the screen using capture_screen
+2. Analyze what the user is doing RIGHT NOW
+3. Give a brief, specific, actionable observation or suggestion
+4. Keep it to 1-2 sentences max
 
-const taskId = process.env.ACCOMPLISH_TASK_ID || 'default';
-const client = await connect();
-const page = await client.page(\`\${taskId}-main\`);
+Examples of GOOD responses:
+- "You have a TypeScript error on line 42 - looks like a missing import for useState."
+- "I see you're on the GitHub PR page. The failing check is a lint error in src/utils.ts."
+- "Your terminal shows a build error: missing dependency 'react-router'. Try running npm install."
 
-await page.goto("https://example.com");
-await waitForPageLoad(page);
+Examples of BAD responses (NEVER do these):
+- "I noticed you might need some help. Would you like me to look at your screen?"
+- "It looks like you're working on something. How can I assist you?"
+- "I see you're busy. Let me know if you need anything."
+</smart-trigger>
 
-console.log({ title: await page.title(), url: page.url() });
-await client.disconnect();
-EOF
-\`\`\`
-</example>
-</usage>
-
-<principles>
-1. **Small scripts**: Each script does ONE thing (navigate, click, fill, check)
-2. **Evaluate state**: Log/return state at the end to decide next steps
-3. **Task-scoped page names**: ALWAYS prefix page names with the task ID from environment:
-   \`\`\`typescript
-   const taskId = process.env.ACCOMPLISH_TASK_ID || 'default';
-   const page = await client.page(\`\${taskId}-main\`);
-   \`\`\`
-   This ensures parallel tasks don't interfere with each other's browser pages.
-4. **Task-scoped screenshot filenames**: ALWAYS prefix screenshot filenames with taskId to prevent parallel tasks from overwriting each other's screenshots:
-   \`\`\`typescript
-   await page.screenshot({ path: \`tmp/\${taskId}-screenshot.png\` });
-   \`\`\`
-5. **Disconnect to exit**: \`await client.disconnect()\` - pages persist on server
-6. **Plain JS in evaluate**: \`page.evaluate()\` runs in browser - no TypeScript syntax
-</principles>
-
-<api-reference name="client">
-\`\`\`typescript
-const taskId = process.env.ACCOMPLISH_TASK_ID || 'default';
-const client = await connect();
-
-const page = await client.page(\`\${taskId}-main\`); // Get or create named page
-const pages = await client.list(); // List all page names
-await client.close(\`\${taskId}-main\`); // Close a page
-await client.disconnect(); // Disconnect (pages persist)
-
-// ARIA Snapshot methods
-const snapshot = await client.getAISnapshot(\`\${taskId}-main\`); // Get accessibility tree
-const element = await client.selectSnapshotRef(\`\${taskId}-main\`, "e5"); // Get element by ref
-\`\`\`
-
-The \`page\` object is a standard Playwright Page.
-</api-reference>
-
-<api-reference name="screenshots">
-IMPORTANT: Always prefix screenshot filenames with taskId to avoid collisions with parallel tasks:
-\`\`\`typescript
-const taskId = process.env.ACCOMPLISH_TASK_ID || 'default';
-await page.screenshot({ path: \`tmp/\${taskId}-screenshot.png\` });
-await page.screenshot({ path: \`tmp/\${taskId}-full.png\`, fullPage: true });
-\`\`\`
-</api-reference>
-
-<api-reference name="aria-snapshot">
-Use \`getAISnapshot()\` to discover page elements. Returns YAML-formatted accessibility tree with refs like \`[ref=e1]\`. Then use \`selectSnapshotRef()\` to interact:
-
-<example name="aria-snapshot-usage">
-\`\`\`typescript
-const taskId = process.env.ACCOMPLISH_TASK_ID || 'default';
-const snapshot = await client.getAISnapshot(\`\${taskId}-main\`);
-console.log(snapshot); // Find the ref you need
-
-const element = await client.selectSnapshotRef(\`\${taskId}-main\`, "e2");
-await element.click();
-\`\`\`
-</example>
-</api-reference>
-
-<error-recovery>
-Page state persists after failures. Debug by reconnecting and taking a screenshot:
-
-<example name="debug-screenshot">
-\`\`\`bash
-cd {{SKILLS_PATH}}/dev-browser && PATH="\${NODE_BIN_PATH}:\$PATH" npx tsx <<'EOF'
-import { connect } from "@/client.js";
-
-const taskId = process.env.ACCOMPLISH_TASK_ID || 'default';
-const client = await connect();
-const page = await client.page(\`\${taskId}-main\`);
-
-await page.screenshot({ path: \`tmp/\${taskId}-debug.png\` });
-console.log({ url: page.url(), title: await page.title() });
-
-await client.disconnect();
-EOF
-\`\`\`
-</example>
-</error-recovery>
-
-<login-pages>
-When you encounter a login page (e.g., Google Sign-In, OAuth screens, authentication prompts):
-- Do NOT say you cannot log in or suggest alternative approaches
-- Instead, ASK the user to log in manually in the browser window
-- Take a screenshot to show the user the login page
-- Say something like: "I've reached a login page. Please log in to your account in the browser window, then let me know when you're done."
-- WAIT for the user to confirm they've logged in before continuing
-- After the user confirms login, take another screenshot to verify you're past the login screen
-- Then continue with the original task
-
-This interactive login flow is essential because:
-- Users expect to authenticate themselves for security
-- Many services require human verification (CAPTCHAs, 2FA)
-- The agent should not give up on tasks that require authentication
-</login-pages>
-
-<filesystem>
-For saving/downloading content:
-- Use browser's native download (click download buttons, Save As)
-- Chrome handles downloads with its own permissions
-- For text/data, copy to clipboard so users can paste where they want
-</filesystem>
-</skill>
-
-<important name="user-confirmations">
-CRITICAL: Always use AskUserQuestion to get explicit approval before sensitive actions.
-Users cannot see CLI/terminal prompts - you MUST ask through the chat interface.
-
-<rules>
-ALWAYS ask before these actions (no exceptions):
-- Financial: Clicking "Buy", "Purchase", "Pay", "Subscribe", "Donate", or any payment button
-- Messaging: Sending emails, messages, comments, reviews, or any communication
-- Forms: Submitting forms that create accounts, place orders, or share personal data
-- Deletion: Clicking "Delete", "Remove", "Cancel subscription", or any destructive action
-- Posting: Publishing content, tweets, posts, or updates to any platform
-- Settings: Changing account settings, passwords, or privacy options
-- Sharing: Sharing content, granting permissions, or connecting accounts
-</rules>
-
-<instructions>
-How to ask:
-- Use AskUserQuestion tool with clear options
-- Describe WHAT will happen: "This will send an email to john@example.com"
-- Show the CONTENT when relevant: "Message: 'Hello, I wanted to follow up...'"
-- Offer options: "Send" / "Edit first" / "Cancel"
-
-NEVER assume intent for irreversible actions. Even if the user said "send the email",
-confirm the final content before clicking send.
-
-When in doubt, ask. A brief confirmation is better than an irreversible mistake.
-</instructions>
-</important>
+<blocked-tool-recovery>
+If a required tool fails, is blocked, or is unavailable:
+1. Name blocker once in one sentence (tool + concrete failure reason)
+2. Provide one exact fix path once (specific menu path, command, or file path)
+3. Ask one concrete follow-up question that unblocks the next action
+4. Do not repeat generic fallback text on later turns; reference the prior blocker briefly and wait for the answer
+</blocked-tool-recovery>
 
 <behavior>
-- Ask clarifying questions before starting ambiguous tasks
-- Write small, focused scripts - each does ONE thing
-- After each script, evaluate the output before deciding next steps
-- Be concise - don't narrate every internal action
-- Hide implementation details - describe actions in user terms
-- For multi-step tasks, summarize at the end rather than narrating each step
-- Don't explain what bash commands you're running - just run them silently
-- Don't announce server checks or startup - proceed directly to the task
-- Only speak to the user when you have meaningful results or need input
+- Be concise. Short answers. No filler.
+- Act first, explain after. Don't ask permission for non-destructive actions.
+- If you can see the problem, state the solution immediately.
+- Don't comment on personal content visible on screen.
+- If something is unclear, ask one specific question.
 </behavior>
 `;
 
@@ -336,11 +183,12 @@ interface OllamaProviderModelConfig {
   tools?: boolean;
 }
 
-interface OllamaProviderConfig {
-  npm: string;
+interface OpenAICompatibleProviderConfig {
+  npm?: string;
   name: string;
-  options: {
-    baseURL: string;
+  options?: {
+    baseURL?: string;
+    apiKey?: string;
   };
   models: Record<string, OllamaProviderModelConfig>;
 }
@@ -353,13 +201,11 @@ interface OpenCodeConfig {
   permission?: string | Record<string, string | Record<string, string>>;
   agent?: Record<string, AgentConfig>;
   mcp?: Record<string, McpServerConfig>;
-  provider?: Record<string, OllamaProviderConfig>;
+  provider?: Record<string, OpenAICompatibleProviderConfig>;
 }
 
 /**
  * Generate OpenCode configuration file
- * OpenCode reads config from .opencode.json in the working directory or
- * from ~/.config/opencode/opencode.json
  */
 export async function generateOpenCodeConfig(): Promise<string> {
   const configDir = path.join(app.getPath('userData'), 'opencode');
@@ -370,42 +216,120 @@ export async function generateOpenCodeConfig(): Promise<string> {
     fs.mkdirSync(configDir, { recursive: true });
   }
 
-  // Get skills directory path and inject into system prompt
+  // Get skills directory path
   const skillsPath = getSkillsPath();
-  const systemPrompt = ACCOMPLISH_SYSTEM_PROMPT_TEMPLATE.replace(/\{\{SKILLS_PATH\}\}/g, skillsPath);
 
   console.log('[OpenCode Config] Skills path:', skillsPath);
 
+  // Get npx path - use bundled npx in packaged app, system npx in dev
+  const npxPath = getNpxPath();
+  const bundledPaths = getBundledNodePaths();
+  
+  // Build environment for MCP servers with proper PATH.
+  // Keep bundled Node.js first when available, then system paths, then inherited PATH.
+  const pathDelimiter = process.platform === 'win32' ? ';' : ':';
+  const basePathEntries = (process.env.PATH || '')
+    .split(pathDelimiter)
+    .filter(Boolean);
+  const mcpPathEntries: string[] = [];
+  const appendPathEntry = (entry?: string) => {
+    if (!entry || mcpPathEntries.includes(entry)) {
+      return;
+    }
+    mcpPathEntries.push(entry);
+  };
+
+  if (bundledPaths) {
+    appendPathEntry(bundledPaths.binDir);
+  }
+
+  // Ensure POSIX system binary locations are available for shell commands
+  // (screencapture, osascript, etc.) while avoiding invalid PATH entries on Windows.
+  if (process.platform !== 'win32') {
+    for (const entry of ['/usr/bin', '/bin', '/usr/sbin', '/sbin']) {
+      appendPathEntry(entry);
+    }
+  }
+
+  for (const entry of basePathEntries) {
+    appendPathEntry(entry);
+  }
+
+  const mcpPath = mcpPathEntries.join(pathDelimiter);
+
+  const shellPath = process.platform === 'win32'
+    ? (process.env.COMSPEC || 'cmd.exe')
+    : '/bin/sh';
+  const mcpEnvironment: Record<string, string> = {
+    PATH: mcpPath,
+    // Ensure SHELL is set for any subprocess that needs it.
+    SHELL: shellPath,
+  };
+  
+  console.log('[OpenCode Config] Using npx path:', npxPath);
+
   // Build file-permission MCP server command
   const filePermissionServerPath = path.join(skillsPath, 'file-permission', 'src', 'index.ts');
+  
+  // Build screen-capture MCP server command
+  const screenCaptureServerPath = path.join(skillsPath, 'screen-capture', 'src', 'index.ts');
+  
+  // Build action-executor MCP server command
+  const actionExecutorServerPath = path.join(skillsPath, 'action-executor', 'src', 'index.ts');
 
-  // Enable providers - add ollama if configured
+  // Build live-screen-stream MCP server command
+  const liveScreenStreamServerPath = path.join(skillsPath, 'live-screen-stream', 'src', 'index.ts');
+  const selectedModel = getSelectedModel();
+
+  // Enable providers - add OpenRouter and conditionally Ollama.
   const ollamaConfig = getOllamaConfig();
-  const baseProviders = ['anthropic', 'openai', 'google', 'xai'];
+  const baseProviders = ['anthropic', 'openai', 'google', 'xai', 'openrouter'];
   const enabledProviders = ollamaConfig?.enabled
     ? [...baseProviders, 'ollama']
     : baseProviders;
 
-  // Build Ollama provider configuration if enabled
-  let providerConfig: Record<string, OllamaProviderConfig> | undefined;
+  const openrouterModels: Record<string, OllamaProviderModelConfig> = {
+    'openai/gpt-4o-mini': {
+      name: 'GPT-4o mini (OpenRouter)',
+      tools: true,
+    },
+    'moonshotai/kimi-k2': {
+      name: 'Kimi K2 (OpenRouter)',
+      tools: true,
+    },
+  };
+
+  // Provider customization:
+  // - OpenRouter: pin API key to OPENROUTER_API_KEY.
+  // - Ollama: include local endpoint and discovered models when configured.
+  const providerConfig: Record<string, OpenAICompatibleProviderConfig> = {
+    openrouter: {
+      npm: '@ai-sdk/openai-compatible',
+      name: 'OpenRouter',
+      options: {
+        baseURL: 'https://openrouter.ai/api/v1',
+        apiKey: '{env:OPENROUTER_API_KEY}',
+      },
+      models: openrouterModels,
+    },
+  };
+
   if (ollamaConfig?.enabled && ollamaConfig.models && ollamaConfig.models.length > 0) {
     const ollamaModels: Record<string, OllamaProviderModelConfig> = {};
     for (const model of ollamaConfig.models) {
       ollamaModels[model.id] = {
         name: model.displayName,
-        tools: true,  // Enable tool calling for all models
+        tools: true,
       };
     }
 
-    providerConfig = {
-      ollama: {
-        npm: '@ai-sdk/openai-compatible',
-        name: 'Ollama (local)',
-        options: {
-          baseURL: `${ollamaConfig.baseUrl}/v1`,  // OpenAI-compatible endpoint
-        },
-        models: ollamaModels,
+    providerConfig.ollama = {
+      npm: '@ai-sdk/openai-compatible',
+      name: 'Ollama (local)',
+      options: {
+        baseURL: `${ollamaConfig.baseUrl}/v1`,
       },
+      models: ollamaModels,
     };
 
     console.log('[OpenCode Config] Ollama provider configured with models:', Object.keys(ollamaModels));
@@ -413,30 +337,51 @@ export async function generateOpenCodeConfig(): Promise<string> {
 
   const config: OpenCodeConfig = {
     $schema: 'https://opencode.ai/config.json',
+    model: selectedModel?.model,
     default_agent: ACCOMPLISH_AGENT_NAME,
-    // Enable all supported providers - providers auto-configure when API keys are set via env vars
     enabled_providers: enabledProviders,
-    // Auto-allow all tool permissions - the system prompt instructs the agent to use
-    // AskUserQuestion for user confirmations, which shows in the UI as an interactive modal.
-    // CLI-level permission prompts don't show in the UI and would block task execution.
+    // Auto-allow all tool permissions - the agent uses UI modals for user confirmations
     permission: 'allow',
     provider: providerConfig,
     agent: {
       [ACCOMPLISH_AGENT_NAME]: {
-        description: 'Browser automation assistant using dev-browser',
-        prompt: systemPrompt,
+        description: 'Screen agent that can see your screen and guide you through tasks',
+        prompt: SCREEN_AGENT_SYSTEM_PROMPT,
         mode: 'primary',
       },
     },
-    // MCP servers for additional tools
+    // MCP servers for screen capture, live stream, actions, and file permissions
+    // Use full npx path to avoid "command not found" in packaged apps
     mcp: {
       'file-permission': {
         type: 'local',
-        command: ['npx', 'tsx', filePermissionServerPath],
+        command: [npxPath, 'tsx', filePermissionServerPath],
         enabled: true,
         environment: {
+          ...mcpEnvironment,
           PERMISSION_API_PORT: String(PERMISSION_API_PORT),
         },
+        timeout: 10000,
+      },
+      'screen-capture': {
+        type: 'local',
+        command: [npxPath, 'tsx', screenCaptureServerPath],
+        enabled: true,
+        environment: mcpEnvironment,
+        timeout: 30000, // Screenshots can take a moment
+      },
+      'live-screen-stream': {
+        type: 'local',
+        command: [npxPath, 'tsx', liveScreenStreamServerPath],
+        enabled: true,
+        environment: mcpEnvironment,
+        timeout: 30000, // Live frame sampling can take a moment
+      },
+      'action-executor': {
+        type: 'local',
+        command: [npxPath, 'tsx', actionExecutorServerPath],
+        enabled: true,
+        environment: mcpEnvironment,
         timeout: 10000,
       },
     },
@@ -450,7 +395,6 @@ export async function generateOpenCodeConfig(): Promise<string> {
   process.env.OPENCODE_CONFIG = configPath;
 
   console.log('[OpenCode Config] Generated config at:', configPath);
-  console.log('[OpenCode Config] Full config:', configJson);
   console.log('[OpenCode Config] OPENCODE_CONFIG env set to:', process.env.OPENCODE_CONFIG);
 
   return configPath;

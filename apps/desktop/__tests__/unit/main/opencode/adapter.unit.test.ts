@@ -75,9 +75,9 @@ class MockPty extends EventEmitter {
   }
 
   // Helper to simulate exit
-  simulateExit(exitCode: number, signal?: number) {
+  simulateExit(exitCode: number | null, signal?: number) {
     const callbacks = this.listeners('exit');
-    callbacks.forEach((cb) => (cb as (params: { exitCode: number; signal?: number }) => void)({ exitCode, signal }));
+    callbacks.forEach((cb) => (cb as (params: { exitCode: number | null; signal?: number }) => void)({ exitCode, signal }));
   }
 
   // Override on to use onData/onExit interface
@@ -86,7 +86,7 @@ class MockPty extends EventEmitter {
     return { dispose: () => this.off('data', callback) };
   }
 
-  onExit(callback: (params: { exitCode: number; signal?: number }) => void) {
+  onExit(callback: (params: { exitCode: number | null; signal?: number }) => void) {
     this.on('exit', callback);
     return { dispose: () => this.off('exit', callback) };
   }
@@ -624,6 +624,124 @@ describe('OpenCode Adapter Module', () => {
         // Assert
         expect(completeEvents.length).toBe(1);
         expect(completeEvents[0].status).toBe('interrupted');
+      });
+
+      it('should emit interrupted status when interrupted with SIGINT and null exit code', async () => {
+        // Arrange
+        const adapter = new OpenCodeAdapter();
+        const completeEvents: Array<{ status: string }> = [];
+        adapter.on('complete', (result) => completeEvents.push(result));
+
+        await adapter.startTask({ prompt: 'Test' });
+
+        // Act
+        await adapter.interruptTask();
+        mockPtyInstance.simulateExit(null, 2);
+
+        // Assert
+        expect(completeEvents.length).toBe(1);
+        expect(completeEvents[0].status).toBe('interrupted');
+      });
+
+      it('should emit error on signal-only process exit', async () => {
+        // Arrange
+        const adapter = new OpenCodeAdapter();
+        const errorEvents: Error[] = [];
+        adapter.on('error', (err) => errorEvents.push(err));
+
+        await adapter.startTask({ prompt: 'Test' });
+
+        // Act
+        mockPtyInstance.simulateExit(null, 9);
+
+        // Assert
+        expect(errorEvents.length).toBe(1);
+        expect(errorEvents[0].message).toContain('signal 9');
+      });
+
+      it('should flush a partial step_finish line before exit', async () => {
+        // Arrange
+        const adapter = new OpenCodeAdapter();
+        const completeEvents: Array<{ status: string }> = [];
+        adapter.on('complete', (result) => completeEvents.push(result));
+
+        await adapter.startTask({ prompt: 'Test' });
+
+        const stepFinish: OpenCodeStepFinishMessage = {
+          type: 'step_finish',
+          part: {
+            id: 'step-1',
+            sessionID: 'session-123',
+            messageID: 'message-123',
+            type: 'step-finish',
+            reason: 'stop',
+          },
+        };
+
+        // Act - no trailing newline, so message remains buffered until exit flushes it
+        mockPtyInstance.simulateData(JSON.stringify(stepFinish));
+        expect(completeEvents.length).toBe(0);
+        mockPtyInstance.simulateExit(0);
+
+        // Assert
+        expect(completeEvents.length).toBe(1);
+        expect(completeEvents[0].status).toBe('success');
+      });
+
+      it('should flush a partial error line before exit and avoid false success', async () => {
+        // Arrange
+        const adapter = new OpenCodeAdapter();
+        const completeEvents: Array<{ status: string; error?: string }> = [];
+        adapter.on('complete', (result) => completeEvents.push(result));
+
+        await adapter.startTask({ prompt: 'Test' });
+
+        const errorMessage: OpenCodeErrorMessage = {
+          type: 'error',
+          error: 'Partial line failure',
+        };
+
+        // Act - no trailing newline, so message remains buffered until exit flushes it
+        mockPtyInstance.simulateData(JSON.stringify(errorMessage));
+        expect(completeEvents.length).toBe(0);
+        mockPtyInstance.simulateExit(0);
+
+        // Assert
+        expect(completeEvents.length).toBe(1);
+        expect(completeEvents[0].status).toBe('error');
+        expect(completeEvents[0].error).toBe('Partial line failure');
+      });
+
+      it('should flush trailing partial text before non-zero exit', async () => {
+        // Arrange
+        const adapter = new OpenCodeAdapter();
+        const messageEvents: unknown[] = [];
+        const errorEvents: Error[] = [];
+        adapter.on('message', (msg) => messageEvents.push(msg));
+        adapter.on('error', (err) => errorEvents.push(err));
+
+        await adapter.startTask({ prompt: 'Test' });
+
+        const textMessage: OpenCodeTextMessage = {
+          type: 'text',
+          part: {
+            id: 'msg-1',
+            sessionID: 'session-123',
+            messageID: 'message-123',
+            type: 'text',
+            text: 'Last buffered chunk',
+          },
+        };
+
+        // Act - buffered text should emit on flush before process error handling
+        mockPtyInstance.simulateData(JSON.stringify(textMessage));
+        expect(messageEvents.length).toBe(0);
+        mockPtyInstance.simulateExit(1);
+
+        // Assert
+        expect(messageEvents.length).toBe(1);
+        expect(errorEvents.length).toBe(1);
+        expect(errorEvents[0].message).toContain('exited with code 1');
       });
 
       it('should not emit duplicate complete events', async () => {

@@ -5,6 +5,7 @@ import {
   taskConfigSchema,
   permissionResponseSchema,
   resumeSessionSchema,
+  desktopControlStatusRequestSchema,
 } from '../../../src/main/ipc/validation';
 import { z } from 'zod';
 
@@ -612,6 +613,26 @@ describe('validation.ts', () => {
         // Assert
         expect(result.success).toBe(false);
       });
+    });
+  });
+
+  describe('desktopControlStatusRequestSchema', () => {
+    it('accepts empty request payload', () => {
+      const result = desktopControlStatusRequestSchema.safeParse({});
+      expect(result.success).toBe(true);
+    });
+
+    it('accepts boolean forceRefresh', () => {
+      const result = desktopControlStatusRequestSchema.safeParse({ forceRefresh: true });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.forceRefresh).toBe(true);
+      }
+    });
+
+    it('rejects non-boolean forceRefresh', () => {
+      const result = desktopControlStatusRequestSchema.safeParse({ forceRefresh: 'yes' });
+      expect(result.success).toBe(false);
     });
   });
 });

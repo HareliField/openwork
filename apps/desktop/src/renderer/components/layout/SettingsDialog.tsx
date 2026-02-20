@@ -9,6 +9,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { StatusMessage } from '@/components/ui/status-message';
 import { Trash2 } from 'lucide-react';
 import type { ApiKeyConfig, SelectedModel } from '@accomplish/shared';
 import { DEFAULT_PROVIDERS } from '@accomplish/shared';
@@ -26,9 +27,40 @@ const API_KEY_PROVIDERS = [
   { id: 'openai', name: 'OpenAI', prefix: 'sk-', placeholder: 'sk-...' },
   { id: 'google', name: 'Google AI', prefix: 'AIza', placeholder: 'AIza...' },
   { id: 'xai', name: 'xAI (Grok)', prefix: 'xai-', placeholder: 'xai-...' },
+  { id: 'openrouter', name: 'OpenRouter', prefix: 'sk-or-v1-', placeholder: 'sk-or-v1-...' },
 ] as const;
+const DEFAULT_OLLAMA_URL = 'http://localhost:11434';
 
 type ProviderId = typeof API_KEY_PROVIDERS[number]['id'];
+
+function getApiKeyFormatError(providerId: ProviderId, key: string): string | null {
+  const providerConfig = API_KEY_PROVIDERS.find((provider) => provider.id === providerId);
+  if (!providerConfig) {
+    return 'Unsupported provider';
+  }
+
+  if (/\s/.test(key)) {
+    return 'API keys cannot contain spaces or line breaks.';
+  }
+
+  const detectedProvider = [...API_KEY_PROVIDERS]
+    .sort((a, b) => b.prefix.length - a.prefix.length)
+    .find((candidate) => key.startsWith(candidate.prefix));
+
+  if (detectedProvider && detectedProvider.id !== providerId) {
+    return `This key looks like ${detectedProvider.name}. Switch provider to ${detectedProvider.name} or paste a valid ${providerConfig.name} key.`;
+  }
+
+  if (!key.startsWith(providerConfig.prefix)) {
+    return `Invalid API key format. Key should start with ${providerConfig.prefix}`;
+  }
+
+  if (key.length <= providerConfig.prefix.length) {
+    return 'API key looks incomplete. Please paste the full key.';
+  }
+
+  return null;
+}
 
 export default function SettingsDialog({ open, onOpenChange, onApiKeySaved }: SettingsDialogProps) {
   const [apiKey, setApiKey] = useState('');
@@ -44,8 +76,9 @@ export default function SettingsDialog({ open, onOpenChange, onApiKeySaved }: Se
   const [selectedModel, setSelectedModel] = useState<SelectedModel | null>(null);
   const [loadingModel, setLoadingModel] = useState(true);
   const [modelStatusMessage, setModelStatusMessage] = useState<string | null>(null);
+  const [modelErrorMessage, setModelErrorMessage] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'cloud' | 'local'>('cloud');
-  const [ollamaUrl, setOllamaUrl] = useState('http://localhost:11434');
+  const [ollamaUrl, setOllamaUrl] = useState(DEFAULT_OLLAMA_URL);
   const [ollamaModels, setOllamaModels] = useState<Array<{ id: string; displayName: string; size: number }>>([]);
   const [ollamaConnected, setOllamaConnected] = useState(false);
   const [ollamaError, setOllamaError] = useState<string | null>(null);
@@ -56,6 +89,29 @@ export default function SettingsDialog({ open, onOpenChange, onApiKeySaved }: Se
 
   useEffect(() => {
     if (!open) return;
+
+    // Reset state on reopen so users don't see stale data
+    setLoadingKeys(true);
+    setLoadingDebug(true);
+    setLoadingModel(true);
+    setIsSaving(false);
+    setStatusMessage(null);
+    setError(null);
+    setProvider('anthropic');
+    setActiveTab('cloud');
+    setDebugMode(false);
+    setSelectedModel(null);
+    setModelStatusMessage(null);
+    setModelErrorMessage(null);
+    setKeyToDelete(null);
+    setApiKey('');
+    setOllamaUrl(DEFAULT_OLLAMA_URL);
+    setOllamaModels([]);
+    setOllamaConnected(false);
+    setOllamaError(null);
+    setTestingOllama(false);
+    setSelectedOllamaModel('');
+    setSavingOllama(false);
 
     const accomplish = getAccomplish();
 
@@ -151,12 +207,14 @@ export default function SettingsDialog({ open, onOpenChange, onApiKeySaved }: Se
         model: model.fullId,
       };
       setModelStatusMessage(null);
+      setModelErrorMessage(null);
       try {
         await accomplish.setSelectedModel(newSelection);
         setSelectedModel(newSelection);
         setModelStatusMessage(`Model updated to ${model.displayName}`);
       } catch (err) {
         console.error('Failed to save model selection:', err);
+        setModelErrorMessage('Failed to update model selection. Please try again.');
       }
     }
   };
@@ -165,20 +223,21 @@ export default function SettingsDialog({ open, onOpenChange, onApiKeySaved }: Se
     const accomplish = getAccomplish();
     const trimmedKey = apiKey.trim();
     const currentProvider = API_KEY_PROVIDERS.find((p) => p.id === provider)!;
+    setError(null);
+    setStatusMessage(null);
 
     if (!trimmedKey) {
       setError('Please enter an API key.');
       return;
     }
 
-    if (!trimmedKey.startsWith(currentProvider.prefix)) {
-      setError(`Invalid API key format. Key should start with ${currentProvider.prefix}`);
+    const formatError = getApiKeyFormatError(provider, trimmedKey);
+    if (formatError) {
+      setError(formatError);
       return;
     }
 
     setIsSaving(true);
-    setError(null);
-    setStatusMessage(null);
 
     try {
       // Validate first
@@ -209,6 +268,8 @@ export default function SettingsDialog({ open, onOpenChange, onApiKeySaved }: Se
   const handleDeleteApiKey = async (id: string, providerName: string) => {
     const accomplish = getAccomplish();
     const providerConfig = API_KEY_PROVIDERS.find((p) => p.id === providerName);
+    setError(null);
+    setStatusMessage(null);
     try {
       await accomplish.removeApiKey(id);
       setSavedKeys((prev) => prev.filter((k) => k.id !== id));
@@ -247,6 +308,8 @@ export default function SettingsDialog({ open, onOpenChange, onApiKeySaved }: Se
   const handleSaveOllama = async () => {
     const accomplish = getAccomplish();
     setSavingOllama(true);
+    setModelStatusMessage(null);
+    setModelErrorMessage(null);
 
     try {
       // Save the Ollama config
@@ -273,6 +336,7 @@ export default function SettingsDialog({ open, onOpenChange, onApiKeySaved }: Se
       setModelStatusMessage(`Model updated to ${selectedOllamaModel}`);
     } catch (err) {
       setOllamaError(err instanceof Error ? err.message : 'Failed to save');
+      setModelErrorMessage('Failed to update model selection. Please try again.');
     } finally {
       setSavingOllama(false);
     }
@@ -353,12 +417,19 @@ export default function SettingsDialog({ open, onOpenChange, onApiKeySaved }: Se
                     </select>
                   )}
                   {modelStatusMessage && (
-                    <p className="mt-3 text-sm text-success">{modelStatusMessage}</p>
+                    <StatusMessage variant="success" className="mt-3">
+                      {modelStatusMessage}
+                    </StatusMessage>
+                  )}
+                  {modelErrorMessage && (
+                    <StatusMessage variant="error" className="mt-3">
+                      {modelErrorMessage}
+                    </StatusMessage>
                   )}
                   {selectedModel && selectedModel.provider !== 'ollama' && !savedKeys.some((k) => k.provider === selectedModel.provider) && (
-                    <p className="mt-3 text-sm text-warning">
+                    <StatusMessage variant="warning" className="mt-3">
                       No API key configured for {DEFAULT_PROVIDERS.find((p) => p.id === selectedModel.provider)?.name}. Add one below.
-                    </p>
+                    </StatusMessage>
                   )}
                 </>
               ) : (
@@ -394,23 +465,23 @@ export default function SettingsDialog({ open, onOpenChange, onApiKeySaved }: Se
                     </div>
                   </div>
 
+                  {testingOllama && (
+                    <StatusMessage variant="loading" className="mb-4">
+                      Testing Ollama connection...
+                    </StatusMessage>
+                  )}
+
                   {/* Connection Status */}
                   {ollamaConnected && (
-                    <div className="mb-4 flex items-center gap-2 text-sm text-success">
-                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                      </svg>
+                    <StatusMessage variant="success" className="mb-4">
                       Connected - {ollamaModels.length} model{ollamaModels.length !== 1 ? 's' : ''} available
-                    </div>
+                    </StatusMessage>
                   )}
 
                   {ollamaError && (
-                    <div className="mb-4 flex items-center gap-2 text-sm text-destructive">
-                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
+                    <StatusMessage variant="error" className="mb-4">
                       {ollamaError}
-                    </div>
+                    </StatusMessage>
                   )}
 
                   {/* Model Selection (only show when connected) */}
@@ -442,6 +513,24 @@ export default function SettingsDialog({ open, onOpenChange, onApiKeySaved }: Se
                     >
                       {savingOllama ? 'Saving...' : 'Use This Model'}
                     </button>
+                  )}
+
+                  {savingOllama && (
+                    <StatusMessage variant="loading" className="mt-4">
+                      Saving model selection...
+                    </StatusMessage>
+                  )}
+
+                  {modelStatusMessage && (
+                    <StatusMessage variant="success" className="mt-4">
+                      {modelStatusMessage}
+                    </StatusMessage>
+                  )}
+
+                  {modelErrorMessage && (
+                    <StatusMessage variant="error" className="mt-4">
+                      {modelErrorMessage}
+                    </StatusMessage>
                   )}
 
                   {/* Help text when not connected */}
@@ -495,6 +584,9 @@ export default function SettingsDialog({ open, onOpenChange, onApiKeySaved }: Se
                       onClick={() => {
                         analytics.trackSelectProvider(p.name);
                         setProvider(p.id);
+                        setApiKey('');
+                        setError(null);
+                        setStatusMessage(null);
                       }}
                       className={`rounded-xl border p-4 text-center transition-all duration-200 ease-accomplish ${
                         provider === p.id
@@ -517,15 +609,30 @@ export default function SettingsDialog({ open, onOpenChange, onApiKeySaved }: Se
                   data-testid="settings-api-key-input"
                   type="password"
                   value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
+                  onChange={(e) => {
+                    setApiKey(e.target.value);
+                    setError(null);
+                    setStatusMessage(null);
+                  }}
                   placeholder={API_KEY_PROVIDERS.find((p) => p.id === provider)?.placeholder}
                   className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                 />
               </div>
 
-              {error && <p className="mb-4 text-sm text-destructive">{error}</p>}
+              {error && (
+                <StatusMessage variant="error" className="mb-4">
+                  {error}
+                </StatusMessage>
+              )}
               {statusMessage && (
-                <p className="mb-4 text-sm text-success">{statusMessage}</p>
+                <StatusMessage variant="success" className="mb-4">
+                  {statusMessage}
+                </StatusMessage>
+              )}
+              {isSaving && (
+                <StatusMessage variant="loading" className="mb-4">
+                  Saving API key...
+                </StatusMessage>
               )}
 
               <button
@@ -639,12 +746,10 @@ export default function SettingsDialog({ open, onOpenChange, onApiKeySaved }: Se
                 </div>
               </div>
               {debugMode && (
-                <div className="mt-4 rounded-xl bg-warning/10 p-3.5">
-                  <p className="text-sm text-warning">
-                    Debug mode is enabled. Backend logs will appear in the task view
-                    when running tasks.
-                  </p>
-                </div>
+                <StatusMessage variant="warning" className="mt-4">
+                  Debug mode is enabled. Backend logs will appear in the task view
+                  when running tasks.
+                </StatusMessage>
               )}
             </div>
           </section>

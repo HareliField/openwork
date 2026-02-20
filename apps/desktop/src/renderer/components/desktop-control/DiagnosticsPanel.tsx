@@ -36,7 +36,9 @@ interface CapabilityViewModel {
   status: 'ready' | 'blocked' | 'unknown';
   message: string;
   steps: string[];
+  remediationTitle?: string;
   systemSettingsPath?: string;
+  diagnostics: string[];
 }
 
 type DiagnosticsReadinessState = 'ok' | 'degraded' | 'unavailable' | 'unknown';
@@ -124,6 +126,74 @@ function getLegacySystemSettingsPath(rawStatus: string): string | undefined {
   return undefined;
 }
 
+function toObjectRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+}
+
+function summarizeAttempts(value: unknown): string | null {
+  if (!Array.isArray(value) || value.length === 0) {
+    return null;
+  }
+
+  const attempts = value
+    .map((attempt) => toObjectRecord(attempt))
+    .filter((attempt): attempt is Record<string, unknown> => attempt !== null);
+
+  if (attempts.length === 0) {
+    return null;
+  }
+
+  const lastAttempt = attempts[attempts.length - 1];
+  const lastOutcome = typeof lastAttempt.outcome === 'string' ? lastAttempt.outcome : null;
+  const attemptNumber =
+    typeof lastAttempt.attempt === 'number' ? Math.floor(lastAttempt.attempt) : attempts.length;
+
+  if (lastOutcome) {
+    return `Probe attempts: ${attemptNumber} (last outcome: ${lastOutcome}).`;
+  }
+  return `Probe attempts: ${attemptNumber}.`;
+}
+
+function buildCapabilityDiagnostics(check: DesktopControlCapabilityStatus): string[] {
+  const diagnostics: string[] = [];
+  const details = toObjectRecord(check.details);
+
+  if (check.errorCode) {
+    diagnostics.push(`Error code: ${check.errorCode}.`);
+  }
+
+  const readinessReasonCode =
+    details && typeof details.readinessReasonCode === 'string' ? details.readinessReasonCode : null;
+  if (readinessReasonCode) {
+    diagnostics.push(`Reason code: ${readinessReasonCode}.`);
+  }
+
+  const attemptsSummary = summarizeAttempts(details?.attempts);
+  if (attemptsSummary) {
+    diagnostics.push(attemptsSummary);
+  }
+
+  const cause = details && typeof details.cause === 'string' ? details.cause : null;
+  if (cause) {
+    diagnostics.push(`Cause: ${cause}.`);
+  }
+
+  const issues = toStringArray(details?.issues);
+  if (issues.length > 0) {
+    diagnostics.push(`Issue: ${issues[0]}.`);
+  }
+
+  return diagnostics;
+}
+
 function getCapabilityViews(status: DesktopControlStatusPayload | null): CapabilityViewModel[] {
   if (!status) return [];
 
@@ -139,7 +209,9 @@ function getCapabilityViews(status: DesktopControlStatusPayload | null): Capabil
       status: check.status === 'ready' ? 'ready' : check.status === 'blocked' ? 'blocked' : 'unknown',
       message: check.message,
       steps: check.remediation?.steps ?? [],
+      remediationTitle: check.remediation?.title,
       systemSettingsPath: check.remediation?.systemSettingsPath,
+      diagnostics: check.status === 'ready' ? [] : buildCapabilityDiagnostics(check),
     }));
   }
 
@@ -157,6 +229,7 @@ function getCapabilityViews(status: DesktopControlStatusPayload | null): Capabil
       status: toCapabilityState(screenStatus),
       message: buildLegacyCapabilityMessage('screen_capture', screenStatus),
       steps: baseStep,
+      diagnostics: [],
       systemSettingsPath: getLegacySystemSettingsPath(screenStatus),
     },
     {
@@ -164,6 +237,7 @@ function getCapabilityViews(status: DesktopControlStatusPayload | null): Capabil
       status: toCapabilityState(actionStatus),
       message: buildLegacyCapabilityMessage('action_execution', actionStatus),
       steps: baseStep,
+      diagnostics: [],
       systemSettingsPath: getLegacySystemSettingsPath(actionStatus),
     },
     {
@@ -171,6 +245,7 @@ function getCapabilityViews(status: DesktopControlStatusPayload | null): Capabil
       status: toCapabilityState(mcpStatus),
       message: buildLegacyCapabilityMessage('mcp_health', mcpStatus),
       steps: baseStep,
+      diagnostics: [],
       systemSettingsPath: getLegacySystemSettingsPath(mcpStatus),
     },
   ];
@@ -309,10 +384,25 @@ function renderCapability(view: CapabilityViewModel) {
         </span>
       </div>
       <p className="mt-1 text-xs text-muted-foreground">{view.message}</p>
+      {view.remediationTitle && !isReady && (
+        <p className="mt-1 text-xs font-medium text-foreground">{view.remediationTitle}</p>
+      )}
       {view.systemSettingsPath && !isReady && (
         <p className="mt-1 text-xs text-muted-foreground">
           Open: {view.systemSettingsPath}
         </p>
+      )}
+      {!isReady && view.diagnostics.length > 0 && (
+        <ul
+          className="mt-1 space-y-1"
+          data-testid={`desktop-control-capability-diagnostics-${view.capability}`}
+        >
+          {view.diagnostics.map((diagnostic, index) => (
+            <li key={`${view.capability}-diagnostic-${index}`} className="text-xs text-muted-foreground">
+              {diagnostic}
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   );

@@ -2,7 +2,14 @@
  * Provider and model configuration types for multi-provider support
  */
 
-export type ProviderType = 'anthropic' | 'openai' | 'google' | 'xai' | 'ollama' | 'custom';
+export type ProviderType =
+  | 'anthropic'
+  | 'openai'
+  | 'google'
+  | 'xai'
+  | 'openrouter'
+  | 'ollama'
+  | 'custom';
 
 export interface ProviderConfig {
   id: ProviderType;
@@ -146,6 +153,29 @@ export const DEFAULT_PROVIDERS: ProviderConfig[] = [
         fullId: 'xai/grok-3',
         contextWindow: 131000,
         supportsVision: false,
+      },
+    ],
+  },
+  {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    requiresApiKey: true,
+    apiKeyEnvVar: 'OPENROUTER_API_KEY',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    models: [
+      {
+        id: 'openai/gpt-4o-mini',
+        displayName: 'GPT-4o mini (OpenRouter)',
+        provider: 'openrouter',
+        fullId: 'openrouter/openai/gpt-4o-mini',
+        supportsVision: true,
+      },
+      {
+        id: 'moonshotai/kimi-k2',
+        displayName: 'Kimi K2 (OpenRouter)',
+        provider: 'openrouter',
+        fullId: 'openrouter/moonshotai/kimi-k2',
+        supportsVision: true,
       },
     ],
   },

@@ -374,7 +374,10 @@ function runtimeEntrypoints(skillsPath: string): {
       path.join(skillsPath, 'screen-capture', 'src', 'index.ts'),
       path.join(skillsPath, 'action-executor', 'src', 'index.ts'),
     ],
-    support: [path.join(skillsPath, 'file-permission', 'src', 'index.ts')],
+    support: [
+      path.join(skillsPath, 'file-permission', 'src', 'index.ts'),
+      path.join(skillsPath, 'live-screen-stream', 'src', 'index.ts'),
+    ],
   };
 }
 

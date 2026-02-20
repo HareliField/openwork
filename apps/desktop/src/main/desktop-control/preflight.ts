@@ -54,8 +54,12 @@ type SnapshotWithoutCache = Omit<DesktopControlStatusSnapshot, 'cache'>;
 
 const ERROR_CODES = {
   SCREEN_RECORDING_PERMISSION_REQUIRED: 'screen_recording_permission_required',
+  SCREEN_RECORDING_PERMISSION_DENIED: 'screen_recording_permission_denied',
+  SCREEN_RECORDING_PERMISSION_RESTRICTED: 'screen_recording_permission_restricted',
+  SCREEN_RECORDING_PERMISSION_NOT_DETERMINED: 'screen_recording_permission_not_determined',
   SCREEN_RECORDING_STATUS_UNKNOWN: 'screen_recording_status_unknown',
   ACCESSIBILITY_PERMISSION_REQUIRED: 'accessibility_permission_required',
+  ACCESSIBILITY_PERMISSION_DENIED: 'accessibility_permission_denied',
   ACCESSIBILITY_STATUS_UNKNOWN: 'accessibility_status_unknown',
   MCP_HEALTHCHECK_FAILED: 'mcp_healthcheck_failed',
   MCP_HEALTH_UNKNOWN: 'mcp_health_unknown',
@@ -71,6 +75,18 @@ const SCREEN_RECORDING_PERMISSION_REASONS = new Set([
 
 const ACCESSIBILITY_PERMISSION_REASONS = new Set(['action_execution_permission_denied']);
 
+const SCREEN_RECORDING_PERMISSION_ERROR_CODES = new Set<string>([
+  ERROR_CODES.SCREEN_RECORDING_PERMISSION_REQUIRED,
+  ERROR_CODES.SCREEN_RECORDING_PERMISSION_DENIED,
+  ERROR_CODES.SCREEN_RECORDING_PERMISSION_RESTRICTED,
+  ERROR_CODES.SCREEN_RECORDING_PERMISSION_NOT_DETERMINED,
+]);
+
+const ACCESSIBILITY_PERMISSION_ERROR_CODES = new Set<string>([
+  ERROR_CODES.ACCESSIBILITY_PERMISSION_REQUIRED,
+  ERROR_CODES.ACCESSIBILITY_PERMISSION_DENIED,
+]);
+
 let cachedSnapshot: {
   expiresAtMs: number;
   value: SnapshotWithoutCache;
@@ -83,21 +99,27 @@ function readyRemediation(title = 'No action needed'): DesktopControlRemediation
   };
 }
 
-function screenRecordingRemediation(): DesktopControlRemediation {
+function screenRecordingRemediation(reasonCode?: string): DesktopControlRemediation {
+  const requiresAdminPolicyUpdate = reasonCode === 'screen_capture_permission_restricted';
   return {
-    title: 'Allow Screen Recording',
+    title: requiresAdminPolicyUpdate
+      ? 'Screen Recording restricted by policy'
+      : 'Allow Screen Recording',
     systemSettingsPath: 'System Settings > Privacy & Security > Screen Recording',
     steps: [
       'Open System Settings > Privacy & Security > Screen Recording.',
-      'Enable permission for Screen Agent.',
+      requiresAdminPolicyUpdate
+        ? 'If Screen Agent is disabled by policy, contact your Mac administrator to allow it.'
+        : 'Enable permission for Screen Agent.',
       'Quit and reopen Screen Agent, then recheck status.',
     ],
   };
 }
 
-function accessibilityRemediation(): DesktopControlRemediation {
+function accessibilityRemediation(reasonCode?: string): DesktopControlRemediation {
+  const requiresAdminPolicyUpdate = reasonCode === 'action_execution_permission_denied';
   return {
-    title: 'Allow Accessibility',
+    title: requiresAdminPolicyUpdate ? 'Allow Accessibility access' : 'Allow Accessibility',
     systemSettingsPath: 'System Settings > Privacy & Security > Accessibility',
     steps: [
       'Open System Settings > Privacy & Security > Accessibility.',
@@ -148,6 +170,32 @@ function createCapabilityStatus(
   };
 }
 
+function getScreenRecordingPermissionErrorCode(reasonCode: string): string {
+  if (reasonCode === 'screen_capture_permission_denied') {
+    return ERROR_CODES.SCREEN_RECORDING_PERMISSION_DENIED;
+  }
+  if (reasonCode === 'screen_capture_permission_restricted') {
+    return ERROR_CODES.SCREEN_RECORDING_PERMISSION_RESTRICTED;
+  }
+  if (reasonCode === 'screen_capture_permission_not_determined') {
+    return ERROR_CODES.SCREEN_RECORDING_PERMISSION_NOT_DETERMINED;
+  }
+  return ERROR_CODES.SCREEN_RECORDING_PERMISSION_REQUIRED;
+}
+
+function getScreenRecordingPermissionMessage(reasonCode: string): string {
+  if (reasonCode === 'screen_capture_permission_denied') {
+    return 'Screen recording permission is denied.';
+  }
+  if (reasonCode === 'screen_capture_permission_restricted') {
+    return 'Screen recording permission is restricted by system policy.';
+  }
+  if (reasonCode === 'screen_capture_permission_not_determined') {
+    return 'Screen recording permission has not been granted yet.';
+  }
+  return 'Screen recording permission is required before taking screenshots.';
+}
+
 function readinessDetails(
   readiness: DesktopControlCapabilityReadiness,
   details: Record<string, unknown> = {}
@@ -183,9 +231,9 @@ function getScreenCaptureStatus(
       'screen_capture',
       'blocked',
       checkedAt,
-      'Screen recording permission is required before taking screenshots.',
-      screenRecordingRemediation(),
-      ERROR_CODES.SCREEN_RECORDING_PERMISSION_REQUIRED,
+      getScreenRecordingPermissionMessage(readiness.reasonCode),
+      screenRecordingRemediation(readiness.reasonCode),
+      getScreenRecordingPermissionErrorCode(readiness.reasonCode),
       readinessDetails(readiness)
     );
   }
@@ -205,7 +253,7 @@ function getScreenCaptureStatus(
   const message =
     readiness.reasonCode === 'screen_capture_probe_timeout'
       ? 'Screen recording readiness check timed out.'
-      : 'Screen recording readiness could not be determined.';
+      : readiness.message || 'Screen recording readiness could not be determined.';
 
   return createCapabilityStatus(
     'screen_capture',
@@ -239,9 +287,9 @@ function getAccessibilityStatus(
       'action_execution',
       'blocked',
       checkedAt,
-      'Accessibility permission is required before keyboard/mouse actions can run.',
-      accessibilityRemediation(),
-      ERROR_CODES.ACCESSIBILITY_PERMISSION_REQUIRED,
+      readiness.message || 'Accessibility permission is required before keyboard/mouse actions can run.',
+      accessibilityRemediation(readiness.reasonCode),
+      ERROR_CODES.ACCESSIBILITY_PERMISSION_DENIED,
       readinessDetails(readiness)
     );
   }
@@ -261,7 +309,7 @@ function getAccessibilityStatus(
   const message =
     readiness.reasonCode === 'action_execution_probe_timeout'
       ? 'Accessibility readiness check timed out.'
-      : 'Accessibility readiness could not be determined.';
+      : readiness.message || 'Accessibility readiness could not be determined.';
 
   return createCapabilityStatus(
     'action_execution',
@@ -340,7 +388,10 @@ function deriveOverallStatus(
     };
   }
 
-  if (checks.screen_capture.errorCode === ERROR_CODES.SCREEN_RECORDING_PERMISSION_REQUIRED) {
+  if (
+    checks.screen_capture.errorCode &&
+    SCREEN_RECORDING_PERMISSION_ERROR_CODES.has(checks.screen_capture.errorCode)
+  ) {
     return {
       status: 'needs_screen_recording_permission',
       errorCode: checks.screen_capture.errorCode,
@@ -349,7 +400,10 @@ function deriveOverallStatus(
     };
   }
 
-  if (checks.action_execution.errorCode === ERROR_CODES.ACCESSIBILITY_PERMISSION_REQUIRED) {
+  if (
+    checks.action_execution.errorCode &&
+    ACCESSIBILITY_PERMISSION_ERROR_CODES.has(checks.action_execution.errorCode)
+  ) {
     return {
       status: 'needs_accessibility_permission',
       errorCode: checks.action_execution.errorCode,
@@ -363,11 +417,18 @@ function deriveOverallStatus(
     checks.action_execution.status !== 'ready' ||
     checks.mcp_health.status !== 'ready'
   ) {
+    const firstNonReadyCheck =
+      checks.screen_capture.status !== 'ready'
+        ? checks.screen_capture
+        : checks.action_execution.status !== 'ready'
+          ? checks.action_execution
+          : checks.mcp_health;
+
     return {
       status: 'unknown',
-      errorCode: ERROR_CODES.PREFLIGHT_UNKNOWN,
-      message: 'Desktop control readiness could not be determined.',
-      remediation: unknownRemediation(),
+      errorCode: firstNonReadyCheck.errorCode ?? ERROR_CODES.PREFLIGHT_UNKNOWN,
+      message: firstNonReadyCheck.message,
+      remediation: firstNonReadyCheck.remediation,
     };
   }
 

@@ -17,6 +17,124 @@ import type {
   TaskMessage,
 } from '@accomplish/shared';
 
+export type DesktopControlOverallStatus =
+  | 'ready'
+  | 'needs_screen_recording_permission'
+  | 'needs_accessibility_permission'
+  | 'mcp_unhealthy'
+  | 'unknown';
+
+export type DesktopControlCapability = 'screen_capture' | 'action_execution' | 'mcp_health';
+export type DesktopControlCheckStatus = 'ready' | 'blocked' | 'unknown';
+
+export interface DesktopControlRemediation {
+  title: string;
+  steps: string[];
+  systemSettingsPath?: string;
+}
+
+export interface DesktopControlCapabilityStatus {
+  capability: DesktopControlCapability;
+  status: DesktopControlCheckStatus;
+  errorCode: string | null;
+  message: string;
+  remediation: DesktopControlRemediation;
+  checkedAt: string;
+  details?: Record<string, unknown>;
+}
+
+export interface DesktopControlStatusSnapshot {
+  status: DesktopControlOverallStatus;
+  errorCode: string | null;
+  message: string;
+  remediation: DesktopControlRemediation;
+  checkedAt: string;
+  cache: {
+    ttlMs: number;
+    expiresAt: string;
+    fromCache: boolean;
+  };
+  checks: {
+    screen_capture: DesktopControlCapabilityStatus;
+    action_execution: DesktopControlCapabilityStatus;
+    mcp_health: DesktopControlCapabilityStatus;
+  };
+}
+
+export interface LegacyDesktopControlStatusSnapshot {
+  status: DesktopControlOverallStatus;
+  capabilities: {
+    screen_capture: string;
+    action_execution: string;
+    mcp_health: string;
+  };
+  checkedAt: number;
+  message?: string;
+  remediation?: string;
+}
+
+export type DesktopControlStatusPayload =
+  | DesktopControlStatusSnapshot
+  | LegacyDesktopControlStatusSnapshot;
+
+interface AccomplishDesktopControlAPI {
+  getDesktopControlStatus?(options?: { forceRefresh?: boolean }): Promise<DesktopControlStatusPayload>;
+  desktopControlGetStatus?(options?: { forceRefresh?: boolean }): Promise<DesktopControlStatusPayload>;
+  desktopControl?: {
+    getStatus?(options?: { forceRefresh?: boolean }): Promise<DesktopControlStatusPayload>;
+  };
+}
+
+function createDesktopControlUnavailableSnapshot(): DesktopControlStatusSnapshot {
+  const checkedAt = new Date().toISOString();
+  const remediation = {
+    title: 'Desktop control status API unavailable',
+    steps: [
+      'Restart Screen Agent and run Recheck again.',
+      'If this persists, update/reinstall the app so preload desktop-control APIs are available.',
+    ],
+  };
+
+  return {
+    status: 'unknown',
+    errorCode: 'desktop_control_status_api_unavailable',
+    message: 'Desktop-control readiness API is unavailable in the renderer bridge.',
+    remediation,
+    checkedAt,
+    cache: {
+      ttlMs: 0,
+      expiresAt: checkedAt,
+      fromCache: false,
+    },
+    checks: {
+      screen_capture: {
+        capability: 'screen_capture',
+        status: 'unknown',
+        errorCode: 'desktop_control_status_api_unavailable',
+        message: 'Readiness could not be checked because the status bridge is unavailable.',
+        remediation,
+        checkedAt,
+      },
+      action_execution: {
+        capability: 'action_execution',
+        status: 'unknown',
+        errorCode: 'desktop_control_status_api_unavailable',
+        message: 'Readiness could not be checked because the status bridge is unavailable.',
+        remediation,
+        checkedAt,
+      },
+      mcp_health: {
+        capability: 'mcp_health',
+        status: 'unknown',
+        errorCode: 'desktop_control_status_api_unavailable',
+        message: 'Readiness could not be checked because the status bridge is unavailable.',
+        remediation,
+        checkedAt,
+      },
+    },
+  };
+}
+
 // Define the API interface
 interface AccomplishAPI {
   // App info
@@ -43,7 +161,11 @@ interface AccomplishAPI {
 
   // Settings
   getApiKeys(): Promise<ApiKeyConfig[]>;
-  addApiKey(provider: 'anthropic' | 'openai' | 'google' | 'xai' | 'custom', key: string, label?: string): Promise<ApiKeyConfig>;
+  addApiKey(
+    provider: 'anthropic' | 'openai' | 'google' | 'xai' | 'openrouter' | 'custom',
+    key: string,
+    label?: string
+  ): Promise<ApiKeyConfig>;
   removeApiKey(id: string): Promise<void>;
   getDebugMode(): Promise<boolean>;
   setDebugMode(enabled: boolean): Promise<void>;
@@ -52,7 +174,7 @@ interface AccomplishAPI {
   // API Key management
   hasApiKey(): Promise<boolean>;
   setApiKey(key: string): Promise<void>;
-  getApiKey(): Promise<string | null>;
+  getApiKey(): Promise<{ exists: boolean; prefix?: string }>;
   validateApiKey(key: string): Promise<{ valid: boolean; error?: string }>;
   validateApiKeyForProvider(provider: string, key: string): Promise<{ valid: boolean; error?: string }>;
   clearApiKey(): Promise<void>;
@@ -94,30 +216,33 @@ interface AccomplishAPI {
   // Logging
   logEvent(payload: { level?: string; message: string; context?: Record<string, unknown> }): Promise<unknown>;
 
-  // Screen Capture
-  getScreenSources(options?: { types?: ('screen' | 'window')[] }): Promise<Array<{
-    id: string;
-    name: string;
-    thumbnailDataUrl: string;
-    displayId: string;
-    appIconDataUrl?: string;
-  }>>;
-  getPrimaryDisplay(): Promise<{
-    id: string;
-    bounds: { x: number; y: number; width: number; height: number };
-    scaleFactor: number;
-    size: { width: number; height: number };
-    workArea: { x: number; y: number; width: number; height: number };
+  // Window controls
+  toggleAlwaysOnTop?(): Promise<boolean>;
+  minimizeWindow?(): Promise<void>;
+  showWindow?(): Promise<void>;
+
+  // Smart trigger
+  getSmartTriggerConfig?(): Promise<{
+    enabled: boolean;
+    idleThresholdSeconds: number;
+    minActivitySeconds: number;
+    checkIntervalMs: number;
   }>;
-  getAllDisplays(): Promise<Array<{
-    id: string;
-    bounds: { x: number; y: number; width: number; height: number };
-    scaleFactor: number;
-    size: { width: number; height: number };
-    workArea: { x: number; y: number; width: number; height: number };
-    isPrimary: boolean;
-  }>>;
-  getScreenSourceId(displayId?: string): Promise<string | null>;
+  setSmartTriggerConfig?(config: {
+    enabled?: boolean;
+    idleThresholdSeconds?: number;
+    minActivitySeconds?: number;
+    checkIntervalMs?: number;
+  }): Promise<unknown>;
+  notifyActivity?(): void;
+  onSmartTrigger?(callback: (data: { reason: string; timestamp: number }) => void): () => void;
+
+  // Desktop control preflight
+  getDesktopControlStatus?(options?: { forceRefresh?: boolean }): Promise<DesktopControlStatusPayload>;
+  desktopControlGetStatus?(options?: { forceRefresh?: boolean }): Promise<DesktopControlStatusPayload>;
+  desktopControl?: {
+    getStatus?(options?: { forceRefresh?: boolean }): Promise<DesktopControlStatusPayload>;
+  };
 }
 
 interface AccomplishShell {
@@ -175,4 +300,28 @@ export function useAccomplish(): AccomplishAPI {
     throw new Error('Accomplish API not available - not running in Electron');
   }
   return api;
+}
+
+/**
+ * Get desktop-control preflight status from the Electron bridge.
+ * This is expected to be backed by IPC channel desktopControl:getStatus.
+ */
+export async function getDesktopControlStatus(
+  options?: { forceRefresh?: boolean }
+): Promise<DesktopControlStatusPayload> {
+  const api = getAccomplish() as AccomplishAPI & AccomplishDesktopControlAPI;
+
+  if (typeof api.getDesktopControlStatus === 'function') {
+    return api.getDesktopControlStatus(options);
+  }
+
+  if (typeof api.desktopControlGetStatus === 'function') {
+    return api.desktopControlGetStatus(options);
+  }
+
+  if (typeof api.desktopControl?.getStatus === 'function') {
+    return api.desktopControl.getStatus(options);
+  }
+
+  return createDesktopControlUnavailableSnapshot();
 }

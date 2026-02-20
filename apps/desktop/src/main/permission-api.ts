@@ -11,10 +11,17 @@ import type { BrowserWindow } from 'electron';
 import type { PermissionRequest, FileOperation } from '@accomplish/shared';
 
 export const PERMISSION_API_PORT = 9226;
+const allowedCorsOrigins = new Set(
+  (process.env.PERMISSION_API_ALLOWED_ORIGINS ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean)
+);
 
 interface PendingPermission {
   resolve: (allowed: boolean) => void;
   timeoutId: NodeJS.Timeout;
+  warningId?: NodeJS.Timeout;
 }
 
 // Store pending permission requests waiting for user response
@@ -23,6 +30,49 @@ const pendingPermissions = new Map<string, PendingPermission>();
 // Store reference to main window and task manager
 let mainWindow: BrowserWindow | null = null;
 let getActiveTaskId: (() => string | null) | null = null;
+
+function hasActiveRendererWindow(window: BrowserWindow | null): window is BrowserWindow {
+  return Boolean(window && !window.isDestroyed() && !window.webContents.isDestroyed());
+}
+
+function sendToRenderer(channel: string, payload: unknown): boolean {
+  if (!hasActiveRendererWindow(mainWindow)) {
+    return false;
+  }
+
+  try {
+    mainWindow.webContents.send(channel, payload);
+    return true;
+  } catch (error) {
+    console.warn(`[Permission API] Failed to send ${channel} to renderer`, error);
+    return false;
+  }
+}
+
+function getRequestOrigin(req: http.IncomingMessage): string | null {
+  return typeof req.headers.origin === 'string' ? req.headers.origin : null;
+}
+
+function applyCorsPolicy(req: http.IncomingMessage, res: http.ServerResponse): boolean {
+  const origin = getRequestOrigin(req);
+
+  // MCP skill requests come from Node fetch/curl and do not include browser Origin headers.
+  if (!origin) {
+    return true;
+  }
+
+  if (!allowedCorsOrigins.has(origin)) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Origin not allowed' }));
+    return false;
+  }
+
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  return true;
+}
 
 /**
  * Initialize the permission API with dependencies
@@ -46,6 +96,9 @@ export function resolvePermission(requestId: string, allowed: boolean): boolean 
   }
 
   clearTimeout(pending.timeoutId);
+  if (pending.warningId) {
+    clearTimeout(pending.warningId);
+  }
   pending.resolve(allowed);
   pendingPermissions.delete(requestId);
   return true;
@@ -61,16 +114,20 @@ function generateRequestId(): string {
 /**
  * Create and start the HTTP server for permission requests
  */
-export function startPermissionApiServer(): http.Server {
+export function startPermissionApiServer(port = PERMISSION_API_PORT): http.Server {
   const server = http.createServer(async (req, res) => {
-    // CORS headers for local requests
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    if (!applyCorsPolicy(req, res)) {
+      return;
+    }
 
     // Handle preflight
     if (req.method === 'OPTIONS') {
-      res.writeHead(200);
+      if (!getRequestOrigin(req)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Origin header is required for preflight requests' }));
+        return;
+      }
+      res.writeHead(204);
       res.end();
       return;
     }
@@ -119,7 +176,7 @@ export function startPermissionApiServer(): http.Server {
     }
 
     // Check if we have the necessary dependencies
-    if (!mainWindow || mainWindow.isDestroyed() || !getActiveTaskId) {
+    if (!hasActiveRendererWindow(mainWindow) || !getActiveTaskId) {
       res.writeHead(503, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Permission API not initialized' }));
       return;
@@ -147,19 +204,33 @@ export function startPermissionApiServer(): http.Server {
     };
 
     // Send to renderer
-    mainWindow.webContents.send('permission:request', permissionRequest);
+    if (!sendToRenderer('permission:request', permissionRequest)) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Permission UI unavailable' }));
+      return;
+    }
 
     // Wait for user response (with 5 minute timeout)
     const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
+    const PERMISSION_WARNING_MS = 4 * 60 * 1000; // Warn 1 minute before timeout
 
     try {
       const allowed = await new Promise<boolean>((resolve, reject) => {
+        // Send a warning to the UI 1 minute before timeout
+        const warningId = setTimeout(() => {
+          sendToRenderer('permission:timeout-warning', {
+            requestId,
+            remainingSeconds: 60,
+          });
+        }, PERMISSION_WARNING_MS);
+
         const timeoutId = setTimeout(() => {
+          clearTimeout(warningId);
           pendingPermissions.delete(requestId);
           reject(new Error('Permission request timed out'));
         }, PERMISSION_TIMEOUT_MS);
 
-        pendingPermissions.set(requestId, { resolve, timeoutId });
+        pendingPermissions.set(requestId, { resolve, timeoutId, warningId });
       });
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -170,13 +241,15 @@ export function startPermissionApiServer(): http.Server {
     }
   });
 
-  server.listen(PERMISSION_API_PORT, '127.0.0.1', () => {
-    console.log(`[Permission API] Server listening on port ${PERMISSION_API_PORT}`);
+  server.listen(port, '127.0.0.1', () => {
+    const address = server.address();
+    const listeningPort = typeof address === 'object' && address ? address.port : port;
+    console.log(`[Permission API] Server listening on port ${listeningPort}`);
   });
 
   server.on('error', (error: NodeJS.ErrnoException) => {
     if (error.code === 'EADDRINUSE') {
-      console.warn(`[Permission API] Port ${PERMISSION_API_PORT} already in use, skipping server start`);
+      console.warn(`[Permission API] Port ${port} already in use, skipping server start`);
     } else {
       console.error('[Permission API] Server error:', error);
     }

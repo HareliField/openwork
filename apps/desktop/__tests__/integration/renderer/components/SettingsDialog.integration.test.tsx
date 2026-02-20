@@ -29,6 +29,9 @@ const mockSetSelectedModel = vi.fn();
 const mockAddApiKey = vi.fn();
 const mockRemoveApiKey = vi.fn();
 const mockValidateApiKeyForProvider = vi.fn();
+const mockGetOllamaConfig = vi.fn();
+const mockTestOllamaConnection = vi.fn();
+const mockSetOllamaConfig = vi.fn();
 
 // Mock accomplish API
 const mockAccomplish = {
@@ -41,6 +44,9 @@ const mockAccomplish = {
   addApiKey: mockAddApiKey,
   removeApiKey: mockRemoveApiKey,
   validateApiKeyForProvider: mockValidateApiKeyForProvider,
+  getOllamaConfig: mockGetOllamaConfig,
+  testOllamaConnection: mockTestOllamaConnection,
+  setOllamaConfig: mockSetOllamaConfig,
 };
 
 // Mock the accomplish module
@@ -102,6 +108,9 @@ describe('SettingsDialog Integration', () => {
     mockValidateApiKeyForProvider.mockResolvedValue({ valid: true });
     mockAddApiKey.mockResolvedValue({ id: 'key-1', provider: 'anthropic', keyPrefix: 'sk-ant-...' });
     mockRemoveApiKey.mockResolvedValue(undefined);
+    mockGetOllamaConfig.mockResolvedValue(null);
+    mockTestOllamaConnection.mockResolvedValue({ success: false, error: 'Not configured' });
+    mockSetOllamaConfig.mockResolvedValue(undefined);
   });
 
   describe('dialog rendering', () => {
@@ -153,6 +162,31 @@ describe('SettingsDialog Integration', () => {
       // Assert
       expect(mockGetApiKeys).not.toHaveBeenCalled();
       expect(mockGetDebugMode).not.toHaveBeenCalled();
+    });
+
+    it('should reset API key input and validation errors after closing and reopening', async () => {
+      // Arrange
+      const { rerender } = render(<SettingsDialog {...defaultProps} />);
+
+      // Act - Trigger a validation error and type input
+      await waitFor(() => {
+        expect(screen.getByPlaceholderText('sk-ant-...')).toBeInTheDocument();
+      });
+      fireEvent.change(screen.getByPlaceholderText('sk-ant-...'), { target: { value: 'invalid-key' } });
+      fireEvent.click(screen.getByRole('button', { name: /save api key/i }));
+      await waitFor(() => {
+        expect(screen.getByText(/invalid api key format/i)).toBeInTheDocument();
+      });
+
+      // Act - Close and reopen dialog
+      rerender(<SettingsDialog {...defaultProps} open={false} />);
+      rerender(<SettingsDialog {...defaultProps} open />);
+
+      // Assert - State from prior open should be cleared
+      await waitFor(() => {
+        expect(screen.queryByText(/invalid api key format/i)).not.toBeInTheDocument();
+      });
+      expect(screen.getByPlaceholderText('sk-ant-...')).toHaveValue('');
     });
   });
 
@@ -261,7 +295,9 @@ describe('SettingsDialog Integration', () => {
 
       // Assert
       await waitFor(() => {
-        expect(screen.getByText('Please enter an API key.')).toBeInTheDocument();
+        const errorMessage = screen.getByText('Please enter an API key.');
+        expect(errorMessage).toBeInTheDocument();
+        expect(errorMessage.closest('[role="alert"]')).toBeInTheDocument();
       });
     });
 
@@ -280,6 +316,45 @@ describe('SettingsDialog Integration', () => {
       await waitFor(() => {
         expect(screen.getByText(/invalid api key format/i)).toBeInTheDocument();
       });
+    });
+
+    it('should reject provider-mismatched keys before network validation', async () => {
+      // Arrange
+      render(<SettingsDialog {...defaultProps} />);
+
+      // Act - Select OpenAI then paste an Anthropic key
+      await waitFor(() => {
+        expect(screen.getByText('OpenAI')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByText('OpenAI'));
+      fireEvent.change(screen.getByPlaceholderText('sk-...'), { target: { value: 'sk-ant-test123' } });
+      fireEvent.click(screen.getByRole('button', { name: /save api key/i }));
+
+      // Assert
+      await waitFor(() => {
+        expect(screen.getByText(/this key looks like anthropic/i)).toBeInTheDocument();
+      });
+      expect(mockValidateApiKeyForProvider).not.toHaveBeenCalled();
+      expect(mockAddApiKey).not.toHaveBeenCalled();
+    });
+
+    it('should reject incomplete keys that only include the provider prefix', async () => {
+      // Arrange
+      render(<SettingsDialog {...defaultProps} />);
+
+      // Act
+      await waitFor(() => {
+        expect(screen.getByPlaceholderText('sk-ant-...')).toBeInTheDocument();
+      });
+      fireEvent.change(screen.getByPlaceholderText('sk-ant-...'), { target: { value: 'sk-ant-' } });
+      fireEvent.click(screen.getByRole('button', { name: /save api key/i }));
+
+      // Assert
+      await waitFor(() => {
+        expect(screen.getByText(/api key looks incomplete/i)).toBeInTheDocument();
+      });
+      expect(mockValidateApiKeyForProvider).not.toHaveBeenCalled();
+      expect(mockAddApiKey).not.toHaveBeenCalled();
     });
 
     it('should validate and save valid API key', async () => {
@@ -320,6 +395,44 @@ describe('SettingsDialog Integration', () => {
       });
     });
 
+    it('should use a fallback validation error message when validator does not return one', async () => {
+      // Arrange
+      mockValidateApiKeyForProvider.mockResolvedValue({ valid: false });
+      render(<SettingsDialog {...defaultProps} />);
+
+      // Act
+      await waitFor(() => {
+        expect(screen.getByPlaceholderText('sk-ant-...')).toBeInTheDocument();
+      });
+      fireEvent.change(screen.getByPlaceholderText('sk-ant-...'), { target: { value: 'sk-ant-invalid' } });
+      fireEvent.click(screen.getByRole('button', { name: /save api key/i }));
+
+      // Assert
+      await waitFor(() => {
+        expect(screen.getByText('Invalid API key')).toBeInTheDocument();
+      });
+    });
+
+    it('should trim whitespace before validating and saving API keys', async () => {
+      // Arrange
+      mockValidateApiKeyForProvider.mockResolvedValue({ valid: true });
+      mockAddApiKey.mockResolvedValue({ id: 'key-1', provider: 'anthropic', keyPrefix: 'sk-ant-...' });
+      render(<SettingsDialog {...defaultProps} />);
+
+      // Act
+      await waitFor(() => {
+        expect(screen.getByPlaceholderText('sk-ant-...')).toBeInTheDocument();
+      });
+      fireEvent.change(screen.getByPlaceholderText('sk-ant-...'), { target: { value: '  sk-ant-trimmed123  ' } });
+      fireEvent.click(screen.getByRole('button', { name: /save api key/i }));
+
+      // Assert
+      await waitFor(() => {
+        expect(mockValidateApiKeyForProvider).toHaveBeenCalledWith('anthropic', 'sk-ant-trimmed123');
+        expect(mockAddApiKey).toHaveBeenCalledWith('anthropic', 'sk-ant-trimmed123');
+      });
+    });
+
     it('should show success message after saving API key', async () => {
       // Arrange
       mockValidateApiKeyForProvider.mockResolvedValue({ valid: true });
@@ -335,7 +448,9 @@ describe('SettingsDialog Integration', () => {
 
       // Assert
       await waitFor(() => {
-        expect(screen.getByText(/anthropic api key saved securely/i)).toBeInTheDocument();
+        const successMessage = screen.getByText(/anthropic api key saved securely/i);
+        expect(successMessage).toBeInTheDocument();
+        expect(successMessage.closest('[role="status"]')).toBeInTheDocument();
       });
     });
 
@@ -375,6 +490,95 @@ describe('SettingsDialog Integration', () => {
 
       // Assert
       expect(screen.getByText('Saving...')).toBeInTheDocument();
+      const loadingMessage = screen.getByText('Saving API key...');
+      expect(loadingMessage).toBeInTheDocument();
+      expect(loadingMessage.closest('[role="status"]')).toBeInTheDocument();
+    });
+
+    it('should clear previous success feedback before showing empty-key validation', async () => {
+      // Arrange
+      mockValidateApiKeyForProvider.mockResolvedValue({ valid: true });
+      mockAddApiKey.mockResolvedValue({ id: 'key-1', provider: 'anthropic', keyPrefix: 'sk-ant-...' });
+      render(<SettingsDialog {...defaultProps} />);
+
+      // Act - Save valid key first
+      await waitFor(() => {
+        expect(screen.getByPlaceholderText('sk-ant-...')).toBeInTheDocument();
+      });
+      fireEvent.change(screen.getByPlaceholderText('sk-ant-...'), { target: { value: 'sk-ant-valid123' } });
+      fireEvent.click(screen.getByRole('button', { name: /save api key/i }));
+
+      await waitFor(() => {
+        expect(screen.getByText(/anthropic api key saved securely/i)).toBeInTheDocument();
+      });
+
+      // Act - Save again with empty key
+      fireEvent.click(screen.getByRole('button', { name: /save api key/i }));
+
+      // Assert
+      await waitFor(() => {
+        expect(screen.getByText('Please enter an API key.')).toBeInTheDocument();
+        expect(screen.queryByText(/api key saved securely/i)).not.toBeInTheDocument();
+      });
+    });
+  });
+
+  describe('state reset on reopen', () => {
+    it('should reset tab, provider, and transient messages when reopened', async () => {
+      // Arrange
+      const { rerender } = render(<SettingsDialog {...defaultProps} />);
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: /save api key/i })).toBeInTheDocument();
+      });
+
+      // Act - create non-default tab/provider + feedback state
+      fireEvent.click(screen.getByText('Google AI'));
+      await waitFor(() => {
+        expect(screen.getByPlaceholderText('AIza...')).toBeInTheDocument();
+      });
+      fireEvent.change(screen.getByPlaceholderText('AIza...'), { target: { value: 'bad-key' } });
+      fireEvent.click(screen.getByRole('button', { name: /save api key/i }));
+      await waitFor(() => {
+        expect(screen.getByText(/invalid api key format/i)).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole('button', { name: /local models/i }));
+      await waitFor(() => {
+        expect(screen.queryByText('Bring Your Own Model/API Key')).not.toBeInTheDocument();
+      });
+
+      // Act - close + reopen
+      rerender(<SettingsDialog {...defaultProps} open={false} />);
+      rerender(<SettingsDialog {...defaultProps} open />);
+
+      // Assert
+      await waitFor(() => {
+        expect(screen.getByText('Bring Your Own Model/API Key')).toBeInTheDocument();
+      });
+      expect(screen.getByPlaceholderText('sk-ant-...')).toBeInTheDocument();
+      expect(screen.queryByText(/invalid api key format/i)).not.toBeInTheDocument();
+    });
+
+    it('should clear stale debug warning immediately on reopen', async () => {
+      // Arrange
+      mockGetDebugMode
+        .mockResolvedValueOnce(true)
+        .mockImplementationOnce(() => new Promise((resolve) => setTimeout(() => resolve(false), 25)));
+      const { rerender } = render(<SettingsDialog {...defaultProps} />);
+
+      await waitFor(() => {
+        expect(screen.getByText(/debug mode is enabled/i)).toBeInTheDocument();
+      });
+
+      // Act
+      rerender(<SettingsDialog {...defaultProps} open={false} />);
+      rerender(<SettingsDialog {...defaultProps} open />);
+
+      // Assert
+      expect(screen.queryByText(/debug mode is enabled/i)).not.toBeInTheDocument();
+      await waitFor(() => {
+        expect(mockGetDebugMode).toHaveBeenCalledTimes(2);
+      });
     });
   });
 
@@ -458,6 +662,32 @@ describe('SettingsDialog Integration', () => {
 
       // Assert - Should not delete, confirmation should be hidden
       expect(mockRemoveApiKey).not.toHaveBeenCalled();
+      await waitFor(() => {
+        expect(screen.queryByText('Are you sure?')).not.toBeInTheDocument();
+      });
+    });
+
+    it('should clear pending delete confirmation after closing and reopening dialog', async () => {
+      // Arrange
+      const savedKeys: ApiKeyConfig[] = [
+        { id: 'key-1', provider: 'anthropic', keyPrefix: 'sk-ant-abc...' },
+      ];
+      mockGetApiKeys.mockResolvedValue(savedKeys);
+      const { rerender } = render(<SettingsDialog {...defaultProps} />);
+
+      // Act - Open confirmation and then close/reopen dialog
+      await waitFor(() => {
+        expect(screen.getByTitle('Remove API key')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByTitle('Remove API key'));
+      await waitFor(() => {
+        expect(screen.getByText('Are you sure?')).toBeInTheDocument();
+      });
+
+      rerender(<SettingsDialog {...defaultProps} open={false} />);
+      rerender(<SettingsDialog {...defaultProps} open />);
+
+      // Assert - Confirmation state should not persist across opens
       await waitFor(() => {
         expect(screen.queryByText('Are you sure?')).not.toBeInTheDocument();
       });
@@ -573,7 +803,9 @@ describe('SettingsDialog Integration', () => {
 
       // Assert
       await waitFor(() => {
-        expect(screen.getByText(/model updated to/i)).toBeInTheDocument();
+        const successMessage = screen.getByText(/model updated to/i);
+        expect(successMessage).toBeInTheDocument();
+        expect(successMessage.closest('[role="status"]')).toBeInTheDocument();
       });
     });
 
@@ -587,7 +819,9 @@ describe('SettingsDialog Integration', () => {
 
       // Assert
       await waitFor(() => {
-        expect(screen.getByText(/no api key configured for google/i)).toBeInTheDocument();
+        const warningMessage = screen.getByText(/no api key configured for google/i);
+        expect(warningMessage).toBeInTheDocument();
+        expect(warningMessage.closest('[role="alert"]')).toBeInTheDocument();
       });
     });
   });
