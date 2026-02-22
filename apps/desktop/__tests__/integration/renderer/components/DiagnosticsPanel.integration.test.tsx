@@ -22,7 +22,10 @@ const floatingChatMocks = vi.hoisted(() => {
     onTaskUpdate: vi.fn(() => () => {}),
     onTaskUpdateBatch: vi.fn(() => () => {}),
     hasAnyApiKey: vi.fn(async () => true),
+    listTasks: vi.fn(async () => []),
+    getSelectedModel: vi.fn(async () => null),
     cancelTask: vi.fn(async () => undefined),
+    interruptTask: vi.fn(async () => undefined),
     startTask: vi.fn(async () => ({ id: 'task-1' })),
     resumeSession: vi.fn(async () => ({ id: 'task-1' })),
   };
@@ -247,5 +250,26 @@ describe('DiagnosticsPanel Integration', () => {
     expect(floatingChatMocks.accomplishApi.resumeSession).not.toHaveBeenCalled();
     expect(floatingChatMocks.getDesktopControlStatus).toHaveBeenNthCalledWith(1, { forceRefresh: false });
     expect(floatingChatMocks.getDesktopControlStatus).toHaveBeenNthCalledWith(2, { forceRefresh: true });
+  });
+
+  it('shows stop control while running and interrupts the active task', async () => {
+    floatingChatMocks.getDesktopControlStatus.mockResolvedValueOnce(readyStatus);
+
+    render(<FloatingChat />);
+
+    const input = screen.getByPlaceholderText('Ask me anything...');
+    fireEvent.change(input, { target: { value: 'Help me run this mission.' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() => {
+      expect(floatingChatMocks.accomplishApi.startTask).toHaveBeenCalledTimes(1);
+    });
+
+    const stopButton = screen.getByRole('button', { name: /stop agent/i });
+    fireEvent.click(stopButton);
+
+    await waitFor(() => {
+      expect(floatingChatMocks.accomplishApi.interruptTask).toHaveBeenCalledWith('task-1');
+    });
   });
 });

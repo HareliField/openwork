@@ -8,8 +8,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Button } from '../ui/button';
-import { Monitor, MonitorOff, Maximize2, Minimize2, RefreshCw } from 'lucide-react';
-import { getAccomplish } from '../../lib/accomplish';
+import { Monitor, MonitorOff, RefreshCw } from 'lucide-react';
 
 interface ScreenSource {
   id: string;
@@ -32,20 +31,28 @@ export function ScreenViewer({
 }: ScreenViewerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [isExpanded, setIsExpanded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sources, setSources] = useState<ScreenSource[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const streamRef = useRef<MediaStream | null>(null);
+  const hasAutoStartedRef = useRef(false);
 
   // Fetch available screen sources
   const fetchSources = useCallback(async () => {
     try {
       setIsLoading(true);
       setError(null);
-      const accomplish = getAccomplish();
-      const screenSources = await accomplish.getScreenSources({ types: ['screen'] });
+      // We rely on getDisplayMedia for actual source selection.
+      // Keep a single virtual source entry so the UI can stay enabled.
+      const screenSources: ScreenSource[] = [
+        {
+          id: 'display-media',
+          name: 'Screen',
+          thumbnailDataUrl: '',
+          displayId: 'default',
+        },
+      ];
       setSources(screenSources);
 
       // Auto-select first source if none selected
@@ -139,18 +146,15 @@ export function ScreenViewer({
 
   // Auto-start if configured
   useEffect(() => {
-    if (autoStart) {
-      fetchSources().then(() => {
-        if (sources.length > 0) {
-          startCapture();
-        }
-      });
+    if (autoStart && !hasAutoStartedRef.current && !isStreaming) {
+      hasAutoStartedRef.current = true;
+      void startCapture();
     }
 
     return () => {
       stopCapture();
     };
-  }, [autoStart]);
+  }, [autoStart, isStreaming, startCapture, stopCapture]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -165,11 +169,7 @@ export function ScreenViewer({
   }, [fetchSources]);
 
   return (
-    <div
-      className={`relative rounded-lg border border-zinc-800 bg-zinc-900 overflow-hidden ${
-        isExpanded ? 'fixed inset-4 z-50' : ''
-      } ${className}`}
-    >
+    <div className={`relative rounded-lg border border-zinc-800 bg-zinc-900 overflow-hidden ${className}`}>
       {/* Header */}
       {showControls && (
         <div className="absolute top-2 left-2 right-2 z-10 flex items-center justify-between">
@@ -208,19 +208,6 @@ export function ScreenViewer({
                 <Monitor className="h-3 w-3" />
               )}
             </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setIsExpanded(!isExpanded)}
-              className="h-6 w-6 p-0 hover:bg-zinc-800"
-              title={isExpanded ? 'Minimize' : 'Expand'}
-            >
-              {isExpanded ? (
-                <Minimize2 className="h-3 w-3" />
-              ) : (
-                <Maximize2 className="h-3 w-3" />
-              )}
-            </Button>
           </div>
         </div>
       )}
@@ -232,7 +219,7 @@ export function ScreenViewer({
         autoPlay
         playsInline
         muted
-        style={{ minHeight: isExpanded ? '100%' : '200px' }}
+        style={{ minHeight: '200px' }}
       />
 
       {/* Placeholder when not streaming */}
@@ -300,14 +287,6 @@ export function ScreenViewer({
             ))}
           </div>
         </div>
-      )}
-
-      {/* Expanded overlay backdrop */}
-      {isExpanded && (
-        <div
-          className="fixed inset-0 bg-black/80 -z-10"
-          onClick={() => setIsExpanded(false)}
-        />
       )}
     </div>
   );

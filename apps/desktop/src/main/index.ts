@@ -1,5 +1,17 @@
 import { config } from 'dotenv';
-import { app, BrowserWindow, shell, ipcMain, nativeImage, session, desktopCapturer, screen } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  shell,
+  ipcMain,
+  nativeImage,
+  session,
+  desktopCapturer,
+  screen,
+  Tray,
+  Menu,
+  globalShortcut,
+} from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -93,12 +105,16 @@ export const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL;
 let mainWindow: BrowserWindow | null = null;
 let expandedWindowBounds: { x: number; y: number; width: number; height: number } | null = null;
 let isCollapsedToIcon = false;
+let tray: Tray | null = null;
+
+const TOGGLE_MICROPHONE_SHORTCUT = 'Control+Command+M';
+const TOGGLE_MICROPHONE_CHANNEL = 'voice:toggle-dictation';
 
 const DEFAULT_WINDOW_MIN_WIDTH = 380;
 const DEFAULT_WINDOW_MIN_HEIGHT = 500;
 const DEFAULT_WINDOW_MAX_WIDTH = 600;
 const DEFAULT_WINDOW_MAX_HEIGHT = 900;
-const ICON_WINDOW_SIZE = 56;
+const ICON_WINDOW_SIZE = 160;
 const ICON_WINDOW_MARGIN = 16;
 
 function getIconWindowBounds(targetWindow: BrowserWindow): { x: number; y: number; width: number; height: number } {
@@ -235,6 +251,99 @@ function createWindow() {
   }
 }
 
+function getAppIcon(): Electron.NativeImage {
+  const iconPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'icon.png')
+    : path.join(process.env.APP_ROOT!, 'resources', 'icon.png');
+  return nativeImage.createFromPath(iconPath);
+}
+
+function ensureMainWindowVisibleAndFocused(): void {
+  const activeWindow = getActiveMainWindow();
+  if (!activeWindow) {
+    createWindow();
+    return;
+  }
+
+  if (isCollapsedToIcon) {
+    activeWindow.setResizable(true);
+    activeWindow.setMinimumSize(DEFAULT_WINDOW_MIN_WIDTH, DEFAULT_WINDOW_MIN_HEIGHT);
+    activeWindow.setMaximumSize(DEFAULT_WINDOW_MAX_WIDTH, DEFAULT_WINDOW_MAX_HEIGHT);
+    activeWindow.setVibrancy('under-window');
+    activeWindow.setHasShadow(true);
+
+    if (expandedWindowBounds) {
+      activeWindow.setBounds(expandedWindowBounds, false);
+    }
+
+    isCollapsedToIcon = false;
+  }
+
+  if (activeWindow.isMinimized()) {
+    activeWindow.restore();
+  }
+
+  activeWindow.show();
+  activeWindow.focus();
+}
+
+function requestDictationToggle(): void {
+  ensureMainWindowVisibleAndFocused();
+
+  const activeWindow = getActiveMainWindow();
+  if (!activeWindow) {
+    return;
+  }
+
+  activeWindow.webContents.send(TOGGLE_MICROPHONE_CHANNEL);
+}
+
+function createTray() {
+  if (process.platform !== 'darwin' || tray) {
+    return;
+  }
+
+  const trayIcon = getAppIcon();
+  if (trayIcon.isEmpty()) {
+    console.warn('[Main] Tray icon could not be created');
+    return;
+  }
+
+  tray = new Tray(trayIcon.resize({ width: 18, height: 18 }));
+  tray.setToolTip('Screen Agent');
+
+  const buildContextMenu = () => Menu.buildFromTemplate([
+    {
+      label: 'Open Screen Agent',
+      click: () => ensureMainWindowVisibleAndFocused(),
+    },
+    {
+      label: `Toggle Microphone (${TOGGLE_MICROPHONE_SHORTCUT})`,
+      click: () => requestDictationToggle(),
+    },
+    { type: 'separator' },
+    {
+      label: 'Quit',
+      click: () => app.quit(),
+    },
+  ]);
+
+  tray.setContextMenu(buildContextMenu());
+  tray.on('click', () => ensureMainWindowVisibleAndFocused());
+}
+
+function registerGlobalShortcuts() {
+  const registered = globalShortcut.register(TOGGLE_MICROPHONE_SHORTCUT, () => {
+    requestDictationToggle();
+  });
+
+  if (!registered) {
+    console.warn(`[Main] Failed to register global shortcut: ${TOGGLE_MICROPHONE_SHORTCUT}`);
+  } else {
+    console.log(`[Main] Registered global shortcut: ${TOGGLE_MICROPHONE_SHORTCUT}`);
+  }
+}
+
 // Use single-instance lock only for packaged apps.
 // In dev we allow running alongside an installed build.
 const shouldUseSingleInstanceLock = app.isPackaged;
@@ -277,10 +386,7 @@ if (shouldUseSingleInstanceLock && !gotTheLock) {
 
     // Set dock icon on macOS
     if (process.platform === 'darwin' && app.dock) {
-      const iconPath = app.isPackaged
-        ? path.join(process.resourcesPath, 'icon.png')
-        : path.join(process.env.APP_ROOT!, 'resources', 'icon.png');
-      const icon = nativeImage.createFromPath(iconPath);
+      const icon = getAppIcon();
       if (!icon.isEmpty()) {
         app.dock.setIcon(icon);
       }
@@ -318,6 +424,8 @@ if (shouldUseSingleInstanceLock && !gotTheLock) {
     console.log('[Main] Screen capture permissions configured');
 
     createWindow();
+    createTray();
+    registerGlobalShortcuts();
 
     // Initialize smart trigger service after window is created
     const activeWindow = getActiveMainWindow();
@@ -350,6 +458,11 @@ app.on('window-all-closed', () => {
 // Dispose TaskManager, SmartTrigger, DesktopContextService, and polling before quitting
 app.on('before-quit', () => {
   console.log('[Main] App before-quit event fired');
+  globalShortcut.unregisterAll();
+  if (tray) {
+    tray.destroy();
+    tray = null;
+  }
   disposeTaskManager();
   disposeSmartTrigger();
   getDesktopContextService().shutdown();
@@ -419,7 +532,7 @@ ipcMain.handle('window:collapse-to-icon', () => {
   activeWindow.setResizable(false);
   activeWindow.setVibrancy(null);
   activeWindow.setHasShadow(false);
-  activeWindow.setBounds(getIconWindowBounds(activeWindow), true);
+  activeWindow.setBounds(getIconWindowBounds(activeWindow), false);
   isCollapsedToIcon = true;
 });
 
@@ -434,7 +547,7 @@ ipcMain.handle('window:expand-from-icon', () => {
   activeWindow.setHasShadow(true);
 
   if (expandedWindowBounds) {
-    activeWindow.setBounds(expandedWindowBounds, true);
+    activeWindow.setBounds(expandedWindowBounds, false);
   }
 
   activeWindow.show();

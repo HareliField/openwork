@@ -27,6 +27,7 @@ type ActionExecutorErrorCode = 'INVALID_INPUT' | 'PERMISSION_MISSING' | 'RUNTIME
 
 const MIN_COORDINATE = 0;
 const MAX_COORDINATE = 100000;
+const MAX_APP_NAME_LENGTH = 120;
 const DEFAULT_SCROLL_AMOUNT = 3;
 const MIN_SCROLL_AMOUNT = 0;
 const MAX_SCROLL_AMOUNT = 100;
@@ -41,6 +42,8 @@ const PERMISSION_REMEDIATION =
 const INVALID_INPUT_REMEDIATION = 'Fix the tool arguments and retry with valid values.';
 const RUNTIME_REMEDIATION =
   'Verify required system dependencies are available (python3, osascript, Quartz) and retry.';
+const APP_ACTIVATION_REMEDIATION =
+  'Verify the app name in Launchpad or /Applications and retry with the exact app name.';
 
 const PERMISSION_ERROR_PATTERNS = [
   'accessibility',
@@ -202,6 +205,13 @@ const APPLESCRIPT_PRESS_KEY = [
   'end run',
 ];
 
+const APPLESCRIPT_ACTIVATE_APP = [
+  'on run argv',
+  '  set appName to item 1 of argv',
+  '  tell application appName to activate',
+  'end run',
+];
+
 class ActionExecutorError extends Error {
   code: ActionExecutorErrorCode;
   details: Record<string, unknown> | undefined;
@@ -323,6 +333,26 @@ function parseText(value: unknown): string {
   }
 
   return value;
+}
+
+function parseAppName(value: unknown): string {
+  if (typeof value !== 'string') {
+    invalidInput('app_name must be a string', { field: 'app_name', receivedType: typeof value });
+  }
+
+  const appName = value.trim();
+  if (appName.length === 0) {
+    invalidInput('app_name cannot be empty', { field: 'app_name' });
+  }
+
+  if (appName.length > MAX_APP_NAME_LENGTH) {
+    invalidInput(`app_name must be ${MAX_APP_NAME_LENGTH} characters or fewer`, {
+      field: 'app_name',
+      length: appName.length,
+    });
+  }
+
+  return appName;
 }
 
 function parseKey(value: unknown): string {
@@ -603,6 +633,49 @@ async function pressKey(
 }
 
 /**
+ * Bring a macOS app to the foreground by name.
+ * AppleScript is primary (reliable focus behavior), with `open -a` as fallback.
+ */
+async function activateApp(appName: string): Promise<void> {
+  try {
+    await runAppleScript(APPLESCRIPT_ACTIVATE_APP, [appName], {
+      action: 'activate_app',
+      appName,
+      method: 'osascript',
+    });
+    return;
+  } catch (appleScriptError) {
+    try {
+      await runExecutable('open', ['-a', appName], {
+        action: 'activate_app',
+        appName,
+        method: 'open',
+        fallbackFrom: 'osascript',
+      });
+      return;
+    } catch (openError) {
+      throw new ActionExecutorError(
+        'RUNTIME_FAILURE',
+        `Failed to activate app "${appName}".`,
+        {
+          action: 'activate_app',
+          appName,
+          osascriptError: {
+            ...extractExecDetails(appleScriptError),
+            cause: errorMessage(appleScriptError),
+          },
+          openError: {
+            ...extractExecDetails(openError),
+            cause: errorMessage(openError),
+          },
+        },
+        APP_ACTIVATION_REMEDIATION
+      );
+    }
+  }
+}
+
+/**
  * Scroll in a direction
  */
 async function scroll(direction: ScrollDirection, amount: number = DEFAULT_SCROLL_AMOUNT): Promise<void> {
@@ -699,6 +772,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
         },
         required: ['x', 'y'],
+      },
+    },
+    {
+      name: 'activate_app',
+      description: 'Bring an application to the foreground by app name',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          app_name: {
+            type: 'string',
+            description: 'Application name as shown in Launchpad/Dock (for example: "Codex", "Cursor", "Terminal")',
+          },
+        },
+        required: ['app_name'],
       },
     },
     {
@@ -802,6 +889,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToo
         await typeText(text);
         return {
           content: [{ type: 'text', text: `Typed: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"` }],
+        };
+      }
+
+      case 'activate_app': {
+        const appName = parseAppName(parsedArgs.app_name);
+        await activateApp(appName);
+        return {
+          content: [{ type: 'text', text: `Activated app: ${appName}` }],
         };
       }
 

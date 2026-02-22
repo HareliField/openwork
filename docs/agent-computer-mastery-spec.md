@@ -1,0 +1,460 @@
+# Agent Computer Mastery Spec
+
+This document teaches an agent how to reliably navigate macOS and collaborate through Codex, Cursor, and ChatGPT Atlas.
+
+Use this as a retrieval guide, not a giant always-loaded prompt.
+
+## 1) Goal and Limits
+
+- Goal: operate like a power user on macOS and in coding assistants.
+- Limit: no agent can know every app perfectly in advance.
+- Required behavior: when app details are unknown, discover quickly with a repeatable process instead of guessing.
+
+## 2) Universal Prompt Contract
+
+When writing to any agent (Codex, Cursor, Atlas), use this structure:
+
+```text
+Task:
+Context:
+Constraints:
+Definition of done:
+Output format:
+Validation:
+```
+
+Rules:
+
+- `Task`: one concrete objective.
+- `Context`: files, environment, versions, current state.
+- `Constraints`: what not to change, style rules, safety rules.
+- `Definition of done`: objective pass criteria.
+- `Output format`: exact sections expected in the reply.
+- `Validation`: commands/tests/checks to prove success.
+
+## 3) Agent Reply Contract
+
+When returning results, use this structure:
+
+```text
+Outcome:
+Changes made:
+Validation run:
+Open issues:
+Next options:
+```
+
+Rules:
+
+- Report facts, not guesses.
+- Include exact file paths and commands.
+- If blocked, state the blocker and the minimum user action required.
+- Keep logs summarized unless full logs are requested.
+
+## 4) macOS System Mastery
+
+### 4.1 Find anything quickly
+
+- Apps:
+- Spotlight: `Cmd+Space`, type app name.
+- Finder apps: `/Applications`, `/System/Applications`.
+- Terminal: `ls /Applications`, `mdfind "kMDItemKind == 'Application' && kMDItemFSName == '*NAME*'"`.
+- Files:
+- Terminal content search: `rg "pattern" /path`.
+- File-name search: `find /path -name "*name*"`.
+- Metadata search: `mdfind "query"`.
+- Settings:
+- Open System Settings and use built-in search bar first.
+- If unknown location, search setting name directly, then verify in the sidebar category.
+- Logs and diagnostics:
+- Console app.
+- `~/Library/Logs`
+- `/Library/Logs`
+- App support/config:
+- `~/Library/Application Support`
+- `~/Library/Preferences`
+- `~/Library/Caches`
+
+### 4.2 Core System Settings map (high-value)
+
+- Network and internet:
+- `System Settings > Wi-Fi`
+- `System Settings > Network`
+- Privacy and permissions:
+- `System Settings > Privacy & Security`
+- Key sections: `Accessibility`, `Screen Recording`, `Files and Folders`, `Full Disk Access`, `Microphone`, `Camera`.
+- Input and UX:
+- `System Settings > Keyboard`
+- `System Settings > Trackpad`
+- `System Settings > Mouse`
+- Display and audio:
+- `System Settings > Displays`
+- `System Settings > Sound`
+- Accounts and startup:
+- `System Settings > Users & Groups`
+- `System Settings > General > Login Items`
+- Power/storage/time:
+- `System Settings > Battery`
+- `System Settings > General > Storage`
+- `System Settings > General > Date & Time`
+- Accessibility:
+- `System Settings > Accessibility`
+
+### 4.3 Unknown App Discovery Playbook
+
+Use this order:
+
+1. Open app and inspect top menu bar.
+2. Open app settings (`Cmd+,` in most apps).
+3. Check `Help` menu and search command name.
+4. Check command palette if available (`Cmd+Shift+P` in many developer tools).
+5. Inspect app logs/settings folders in `~/Library`.
+6. Verify behavior with a minimal reproducible action.
+7. Only then propose steps to user.
+
+## 5) Codex Workflow (How to write to Codex)
+
+Use direct, execution-ready instructions:
+
+```text
+Task: Fix <issue>.
+Context: Repo path is <path>. Relevant files: <paths>.
+Constraints: Do not edit <x>. Keep style <y>. No destructive git commands.
+Definition of done: <tests pass + behavior>.
+Output format: summary + changed files + tests run + risks.
+Validation: run <commands>.
+```
+
+Best practices:
+
+- Give exact paths and expected behavior.
+- Ask for tool execution, not just advice, when you want edits.
+- Request verification commands explicitly.
+- Ask for a short diff summary if speed matters.
+
+## 6) Cursor Workflow (How to write to Cursor)
+
+Choose mode intentionally:
+
+- Use `Ask` for exploration/architecture.
+- Use `Agent/Edit` for implementation and file changes.
+
+Prompt template:
+
+```text
+Implement <feature/fix> in <files>.
+Keep <constraints>.
+Return:
+1) files changed
+2) why each change was needed
+3) commands run
+4) remaining risks
+```
+
+Cursor-specific guidance:
+
+- Pin/open target files before prompting to improve relevance.
+- Include acceptance tests in prompt.
+- Ask Cursor to avoid touching unrelated files.
+- Ask for small, reviewable commits/diffs.
+
+## 7) ChatGPT Atlas Workflow
+
+Use Atlas for planning, research framing, and structured synthesis, then move executable work to Codex/Cursor.
+
+Prompt template:
+
+```text
+Role: Senior technical analyst.
+Task: Produce a plan for <goal>.
+Context: <project/system context>.
+Constraints: <time/cost/risk limits>.
+Output: decision table + recommended plan + rollback plan.
+```
+
+Rules:
+
+- Ask for assumptions to be listed explicitly.
+- Ask for trade-offs and failure modes.
+- Ask for output in copy-pasteable checklists.
+- Convert accepted plan into Codex/Cursor execution prompt.
+
+Note:
+
+- If your ChatGPT UI label differs from "Atlas", keep the same prompt structure.
+
+## 8) Read-Back Protocol (How to read messages and report back)
+
+When an agent message is long, parse in this order:
+
+1. Claimed outcome
+2. Actual files changed
+3. Validation evidence
+4. Risks/blockers
+
+Return to the user with:
+
+```text
+What was requested:
+What was actually done:
+Proof:
+Gaps:
+Recommended next command:
+```
+
+## 9) Cross-Agent Handoff Template
+
+Use this exact minimal handoff:
+
+```text
+Objective:
+Current state:
+Changed files:
+Pending tasks:
+Constraints:
+Verification commands:
+```
+
+Keep it under 200 words unless asked otherwise.
+
+## 10) Cost-Control Rules (Important)
+
+To avoid high token cost every turn:
+
+1. Keep root `AGENTS.md` short and pointer-only.
+2. Load only one relevant section of this spec at a time.
+3. Reuse templates instead of writing new long instructions.
+4. Avoid repeating unchanged background context.
+5. Summarize logs; provide full output only on request.
+
+## 11) Quick Commands Cheat Sheet
+
+```bash
+# System info
+sw_vers
+uname -a
+
+# Find apps and files
+ls /Applications
+mdfind "Cursor"
+mdfind "kMDItemDisplayName == '*Codex*'"
+rg "keyword" /Users/hareli/Projects/openwork
+
+# Common macOS data locations
+ls ~/Library/"Application Support"
+ls ~/Library/Logs
+```
+
+## 12) Codex Desktop Operation Playbook (Detailed)
+
+Use this section when the user asks for direct Codex UI actions.
+
+### 12.1 Execution loop (always follow in order)
+
+1. Restate the mission in one sentence before acting.
+2. Bring Codex to foreground.
+3. Verify Codex is focused.
+4. Navigate only to UI needed for the mission.
+5. Execute one action.
+6. Verify state changed as expected.
+7. Continue until the mission definition of done is fully satisfied.
+
+Never stop at "I am about to click." Finish the click and verify result.
+
+### 12.2 Bring Codex to front (do not assume focus)
+
+Use this priority order:
+
+1. Click Codex in Dock.
+2. If not visible, use `Cmd+Tab` until Codex is active.
+3. If Codex is not running, open Spotlight (`Cmd+Space`), type `Codex`, press `Enter`.
+4. If Spotlight fails, open from `/Applications`.
+
+Focus verification checklist:
+
+- macOS menu bar app name shows `Codex`.
+- Codex window is frontmost (not behind another app).
+- Visible workspace or thread belongs to requested task context.
+
+### 12.3 Codex UI map for task routing
+
+Use the smallest navigation that solves the task:
+
+- Source control task: open Source Control (branch icon) or `Ctrl+Shift+G`.
+- File/task reading: use Explorer.
+- Thread review/respond: use Threads.
+
+Wrong-panel guardrail:
+
+- Do not enter Threads/other panels if user asked for commit/push.
+- If wrong panel was opened, return immediately to Source Control and continue.
+
+### 12.4 Action completion rule (critical)
+
+An action is complete only after observable state change.
+
+- Selecting/highlighting an option is not execution.
+- For dialogs with final CTA, the agent must click the final button.
+- After each click, wait briefly and confirm UI changed.
+
+Required verification after final-action click:
+
+- Button state changes, modal closes, or progress indicator appears.
+- Success/failure toast, sync indicator, or changed git status is visible.
+- If nothing changes, retry once and investigate blocker.
+
+### 12.5 Codex commit and push SOP (all changes, blank message)
+
+Use this exact sequence when user asks to commit/push all changes including unstaged and leave commit message blank:
+
+1. Bring Codex to front using section 12.2.
+2. Open Source Control (`Ctrl+Shift+G` or branch icon).
+3. Confirm repository is the expected one (for this project: `openwork`).
+4. Ensure all changes are included:
+- Use `Include unstaged = ON` when that control exists.
+- Otherwise run `Stage All Changes` from Source Control actions.
+5. Verify changed-file count reflects full working tree.
+6. Leave commit message field empty if UI supports autogeneration/empty commit message flow.
+7. Select `Commit and push` as next step.
+8. Click `Continue` (or equivalent final confirmation button).
+9. Wait for push completion feedback.
+10. Verify success:
+- branch sync indicator settles,
+- push success message appears, or
+- Source Control shows clean/updated state.
+11. If prompted for auth/conflict, resolve prompt and continue.
+12. Report exact completed actions and final outcome.
+
+Do not stop after selecting `Commit and push`; click `Continue`.
+
+### 12.6 Input reliability rules (mouse/keyboard)
+
+- Keyboard shortcut fails: click Codex window once, retry shortcut.
+- Text input fails: click directly in field, then type/paste.
+- Click seems ignored: verify no overlay/modal interception, then retry.
+- If repeated failure: switch to menu-based path for same action.
+
+### 12.7 Recovery when stuck or uncertain
+
+Use this fallback order:
+
+1. Re-check mission and current UI state.
+2. Return to smallest known-good state (usually Source Control root).
+3. Execute one minimal step.
+4. Verify change.
+5. Repeat.
+
+If blocked by permissions, auth, merge conflict, or missing remote access, report:
+
+- exact blocker,
+- where it appears,
+- smallest user action required.
+
+### 12.8 Mandatory progress reporting format for live UI tasks
+
+During execution, report actions as completed facts:
+
+```text
+Action done:
+Observed result:
+Next immediate action:
+```
+
+Avoid speculative phrasing such as "I will click" without confirming click happened.
+
+### 12.9 Self-awareness and self-UI filtering (critical)
+
+When operating inside Codex, the agent must treat Codex as self-environment, not a third-party app to narrate.
+
+Rules:
+
+- Do not describe assistant side panels (for example Claude/Codex helper panes) unless user explicitly asks about them.
+- Do not report "there is an agent on the right" as task-relevant context.
+- Prioritize only user-requested target surfaces: app under control, dialog needed for task, and required controls.
+- If uncertain whether a visible panel is relevant, ignore it and proceed with mission-critical UI first.
+
+Allowed mention of self-UI:
+
+- Only when it blocks action (for example modal overlay preventing click), and only as a blocker report.
+
+### 12.10 Conversation continuity protocol (critical)
+
+If the user says `continue`, `go on`, or similar, assume same thread context by default.
+
+Required sequence before asking user for repeated context:
+
+1. Read the latest user request in current thread.
+2. Read the previous assistant action/result in current thread.
+3. Restate inferred active mission in one line.
+4. Resume execution from last completed step.
+
+Do not ask "what are we working on?" unless both conditions are true:
+
+- thread context is genuinely unavailable, and
+- last actionable task cannot be inferred from recent messages.
+
+When context is partially missing, ask one targeted clarification question tied to the inferred mission, not a broad reset request.
+
+Mini template:
+
+```text
+Inferred mission:
+Last completed step:
+Next step now:
+```
+
+### 12.11 Commit/push anti-stall guardrail (critical)
+
+Use this when user intent includes push (examples: "commit and push", "push changes").
+
+Decision rule:
+
+- If push is requested, plain `Commit` is not an acceptable terminal action.
+- Required path is `Commit and push` followed by final confirmation (`Continue` or equivalent).
+
+Timed execution guard:
+
+1. Select `Commit and push`.
+2. Within 2 seconds, perform final click on `Continue`.
+3. Within 5 seconds, verify a state change (modal closes/progress/toast/git state update).
+
+If stalled:
+
+- No state change after selecting `Commit and push`: re-click `Continue` once.
+- If still unchanged, close/reopen commit dialog and repeat full flow.
+- If blocked by validation/auth/conflict prompt, report blocker and resolve prompt path.
+
+Completion proof (must be reported):
+
+- Exact final action clicked (`Continue`).
+- Observable post-click evidence (push progress/success indicator).
+- End state (cleaner Source Control or updated sync state).
+
+### 12.12 Click precision and transition speed (critical)
+
+Use this for small/high-impact buttons such as `Commit and push` and `Continue`.
+
+Target-lock click protocol:
+
+1. Bring target button fully into view (no overlap, no clipping).
+2. Pause for visual confirmation of exact label text.
+3. Click the center area of the target button, not near edges.
+4. Confirm pressed state immediately (highlight/ripple/pressed state).
+5. If no pressed state, click center once more.
+
+Near-miss prevention:
+
+- Do not click while moving; settle pointer first.
+- Prefer single deliberate clicks over fast inaccurate clicks.
+- If adjacent buttons exist (`Commit` vs `Commit and push`), re-read label text before click.
+
+Speed budget for commit flow:
+
+- From opening commit dialog to selecting `Commit and push`: <= 4 seconds.
+- From selecting `Commit and push` to clicking `Continue`: <= 2 seconds.
+- If budget exceeded, trigger stuck-recovery immediately (no idle waiting).
+
+Post-click confirmation:
+
+- If button remains unchanged after two centered clicks, assume miss/overlay and reopen the step.
+- Report exact retry reason (`miss`, `overlay`, `focus lost`, `unknown`).

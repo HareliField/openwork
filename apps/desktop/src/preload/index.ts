@@ -225,6 +225,11 @@ const accomplishAPI = {
     ipcRenderer.on('task:summary', listener);
     return () => ipcRenderer.removeListener('task:summary', listener);
   },
+  onToggleDictationRequested: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on('voice:toggle-dictation', listener);
+    return () => ipcRenderer.removeListener('voice:toggle-dictation', listener);
+  },
 
   logEvent: (payload: { level?: string; message: string; context?: Record<string, unknown> }) =>
     ipcRenderer.invoke('log:event', payload),

@@ -507,24 +507,15 @@ export class OpenCodeAdapter extends EventEmitter<OpenCodeAdapterEvents> {
         const toolUseInput = toolUseMessage.part.state?.input;
         const toolUseOutput = toolUseMessage.part.state?.output || '';
 
-        // For models that don't emit text messages (like Gemini), emit the tool description
-        // as a thinking message so users can see what the AI is doing
+        // Keep tool descriptions in debug/progress only.
+        // Rendering them as assistant chat messages encourages speculative/fabricated narration.
         const toolDescription = (toolUseInput as { description?: string })?.description;
         if (toolDescription) {
-          // Create a synthetic text message for the description
-          const syntheticTextMessage: OpenCodeMessage = {
-            type: 'text',
-            timestamp: message.timestamp,
-            sessionID: message.sessionID,
-            part: {
-              id: this.generateMessageId(),
-              sessionID: toolUseMessage.part.sessionID,
-              messageID: toolUseMessage.part.messageID,
-              type: 'text',
-              text: toolDescription,
-            },
-          } as import('@accomplish/shared').OpenCodeTextMessage;
-          this.emit('message', syntheticTextMessage);
+          this.emit('debug', {
+            type: 'tool-description',
+            message: toolDescription,
+            data: { tool: toolUseName },
+          });
         }
 
         // Forward to handlers.ts for message processing (screenshots, etc.)

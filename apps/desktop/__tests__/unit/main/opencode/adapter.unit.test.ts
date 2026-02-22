@@ -365,6 +365,44 @@ describe('OpenCode Adapter Module', () => {
         expect(toolResultEvents[0]).toBe('File contents here');
       });
 
+      it('should not emit synthetic assistant text for tool_use descriptions', async () => {
+        // Arrange
+        const adapter = new OpenCodeAdapter();
+        const messages: unknown[] = [];
+        const debugEvents: Array<{ type: string; message: string; data?: unknown }> = [];
+        adapter.on('message', (msg) => messages.push(msg));
+        adapter.on('debug', (event) => debugEvents.push(event));
+
+        await adapter.startTask({ prompt: 'Test' });
+
+        const toolUseMessage: OpenCodeToolUseMessage = {
+          type: 'tool_use',
+          part: {
+            id: 'tool-1',
+            sessionID: 'session-123',
+            messageID: 'message-123',
+            type: 'tool',
+            tool: 'click',
+            state: {
+              status: 'running',
+              input: {
+                x: 120,
+                y: 200,
+                description: 'Now let me click the Dock icon.',
+              },
+            },
+          },
+        };
+
+        // Act
+        mockPtyInstance.simulateData(JSON.stringify(toolUseMessage) + '\n');
+
+        // Assert
+        expect(messages).toHaveLength(1);
+        expect((messages[0] as { type?: string }).type).toBe('tool_use');
+        expect(debugEvents.some((event) => event.type === 'tool-description')).toBe(true);
+      });
+
       it('should emit complete event on step_finish with stop reason', async () => {
         // Arrange
         const adapter = new OpenCodeAdapter();

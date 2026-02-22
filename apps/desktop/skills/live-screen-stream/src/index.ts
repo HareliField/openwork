@@ -166,7 +166,7 @@ async function getActiveWindowRegionArg(): Promise<string | null> {
       end tell'
     `);
 
-    const boundsMatch = stdout.match(/(\d+),\s*(\d+).*?(\d+),\s*(\d+)/);
+    const boundsMatch = stdout.match(/(-?\d+),\s*(-?\d+).*?(\d+),\s*(\d+)/);
     if (!boundsMatch) {
       console.error(
         'Could not parse active window bounds, falling back to full screen capture.'
